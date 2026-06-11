@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "Akıllı Hesap Bölüşme",
+    "slug": "akilli-hesap-bolusme",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "ahb",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": {
+      "backgroundColor": "#0b0e1a"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Fiş okumak için bilgisayarındaki geliştirme sunucusuna bağlanır.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "edgeToEdgeEnabled": true
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Fişin fotoğrafını seçmek için galeriye erişim gerekiyor.",
+          "cameraPermission": "Fişi taramak için kameraya erişim gerekiyor."
+        }
+      ]
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "@ahb/server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "İnce AI orkestrasyon backend'i (Hono). Deploy hedefi: Cloudflare Workers; yerelde Node ile çalışır.",
+  "type": "module",
+  "scripts": {
+    "dev": "node --import tsx --watch src/index.node.ts",
+    "start": "node --import tsx src/index.node.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ahb/ai-orchestrator": "*",
+    "@hono/node-server": "^1.12.2",
+    "dotenv": "^16.4.5",
+    "hono": "^4.5.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsx": "^4.17.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
+  }
+}

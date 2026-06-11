@@ -1,0 +1,26 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+coverage/
+.env
+.env.*
+!.env.example
+
+# Expo / React Native
+.expo/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+web-build/
+
+# Cloudflare Workers
+.wrangler/
+.dev.vars
+
+# TypeScript / tooling
+*.tsbuildinfo
+.turbo/

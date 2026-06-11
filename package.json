@@ -1,0 +1,14 @@
+{
+  "name": "akilli-hesap-bolusme",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI fiş tarama + çok platformlu hesap bölüşme uygulaması (monorepo)",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  }
+}

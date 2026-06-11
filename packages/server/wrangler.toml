@@ -1,0 +1,10 @@
+# Cloudflare Workers deploy yapılandırması (DESIGN.md §6.2).
+# Anahtarı koda yazma; secret olarak ekle:  wrangler secret put GEMINI_API_KEY
+name = "ahb-server"
+main = "src/worker.ts"
+compatibility_date = "2026-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+AHB_PROVIDER = "gemini"
+GEMINI_MODEL = "gemini-2.5-flash"
