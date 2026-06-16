@@ -6,11 +6,16 @@ import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 export interface OptimizedImage {
   base64: string;
   mimeType: string;
+  /** Optimize edilmiş dosyanın yerel URI'si — binary (base64'süz) upload için. */
+  uri: string;
 }
 
+// Hız/doğruluk dengesi (DESIGN.md §7): 1600px genişlik tipik fişlerde ≥200 DPI'yi korur
+// ama 2200px'e göre yükü ~yarıya indirir. compress 0.85 → ince rakam/ondalık noktası bozulmaz.
+// (Faz 0 benchmark harness'ı ile doğrulanır: maxWidth düşürünce F1 düşmemeli.)
 export const SCAN_IMAGE = {
-  maxWidth: 1400,
-  compress: 0.55,
+  maxWidth: 1600,
+  compress: 0.85,
   format: SaveFormat.JPEG,
 } as const;
 
@@ -39,5 +44,5 @@ export async function prepareImageForUpload(uri: string): Promise<OptimizedImage
     console.log(`[ahb] optimize edilmiş görüntü ~${kb} KB`);
   }
 
-  return { base64: result.base64, mimeType: "image/jpeg" };
+  return { base64: result.base64, mimeType: "image/jpeg", uri: result.uri };
 }

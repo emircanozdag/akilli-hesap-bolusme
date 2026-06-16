@@ -2,6 +2,7 @@
  * Orkestrasyon güvenilirlik hattı — DESIGN.md §7.
  */
 import type { Charges, LineItem, Receipt } from "@ahb/split-engine";
+import { normalizeDiscountLines } from "./normalize-discounts.js";
 import { rawOcrResultSchema, type RawOcrResult } from "./schema.js";
 import { resolveRegional } from "./regional.js";
 import type { VisionProvider } from "./provider.js";
@@ -53,7 +54,7 @@ export function analyzeRaw(
       parsed.error.issues,
     );
   }
-  const data: RawOcrResult = parsed.data;
+  const data: RawOcrResult = normalizeDiscountLines(parsed.data);
 
   const flags: FieldFlag[] = [];
   const warnings: string[] = [];
@@ -166,4 +167,84 @@ export function analyzeRaw(
     warnings,
     cached: false,
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* Kalite notu: kademeli sağlayıcı (EscalatingProvider) için skorlama  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Ham sağlayıcı çıktısının kalite notu. analyzeRaw'ı yeniden kullanır (tek doğruluk
+ * kaynağı): şema geçerli mi, toplam dengeli mi, kaç alan onaya düşüyor / düşük güvende.
+ * EscalatingProvider bununla "pro'ya yükselt" ve "iki sonuçtan iyisini seç" kararı verir.
+ */
+export interface RawGrade {
+  /** Şema geçerli mi (analyzeRaw OrchestrationError fırlatmadı). */
+  valid: boolean;
+  /** Aritmetik mutabakat: beklenen toplam == beyan edilen toplam. */
+  balanced: boolean;
+  /** Onaya düşen kritik alan sayısı (currency/total). */
+  needsConfirmation: number;
+  /** Düşük güvenle okunan kalem sayısı. */
+  lowConfidenceCount: number;
+  /** Toplam işaret (flag) sayısı. */
+  flagCount: number;
+  /** Geçerliyse analiz sonucu (yeniden hesaplamayı önlemek için). */
+  analyzed?: AnalyzedReceipt;
+}
+
+export function gradeRaw(
+  raw: unknown,
+  input: AnalyzeInput,
+  options: OrchestrateOptions = {},
+): RawGrade {
+  let analyzed: AnalyzedReceipt;
+  try {
+    analyzed = analyzeRaw(raw, input, options);
+  } catch (err) {
+    if (err instanceof OrchestrationError) {
+      return {
+        valid: false,
+        balanced: false,
+        needsConfirmation: Number.POSITIVE_INFINITY,
+        lowConfidenceCount: Number.POSITIVE_INFINITY,
+        flagCount: Number.POSITIVE_INFINITY,
+      };
+    }
+    throw err;
+  }
+  return {
+    valid: true,
+    balanced: analyzed.arithmetic.balanced,
+    needsConfirmation: analyzed.needsConfirmation.length,
+    lowConfidenceCount: analyzed.flags.filter((f) => f.reason === "low_confidence").length,
+    flagCount: analyzed.flags.length,
+    analyzed,
+  };
+}
+
+/**
+ * Yükseltme tetiği: şema bozuk, toplam tutmuyor ya da düşük güvenli kalem var →
+ * daha güçlü model işe yarayabilir. Yalnız currency belirsizliği (kullanıcı kolayca
+ * onaylar, güçlü model de yardımcı olmaz) tek başına yükseltmeyi tetiklemez.
+ */
+export function shouldEscalate(grade: RawGrade): boolean {
+  return !grade.valid || !grade.balanced || grade.lowConfidenceCount > 0;
+}
+
+/**
+ * İki nottan hangisinin daha iyi olduğunu söyler. Öncelik sırası:
+ * geçerlilik → dengeli toplam → daha az onay → daha az düşük-güven → daha az flag.
+ * `candidate`, `current`'tan kesinlikle daha iyiyse true.
+ */
+export function isBetterGrade(candidate: RawGrade, current: RawGrade): boolean {
+  if (candidate.valid !== current.valid) return candidate.valid;
+  if (candidate.balanced !== current.balanced) return candidate.balanced;
+  if (candidate.needsConfirmation !== current.needsConfirmation) {
+    return candidate.needsConfirmation < current.needsConfirmation;
+  }
+  if (candidate.lowConfidenceCount !== current.lowConfidenceCount) {
+    return candidate.lowConfidenceCount < current.lowConfidenceCount;
+  }
+  return candidate.flagCount < current.flagCount;
 }

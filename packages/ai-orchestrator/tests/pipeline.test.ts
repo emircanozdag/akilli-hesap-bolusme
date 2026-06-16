@@ -133,4 +133,137 @@ describe("analyzeRaw — aritmetik & confidence flag'leri (§7)", () => {
     expect(r.arithmetic.balanced).toBe(true);
     expect(r.regional.suggestedTipPercentages).toEqual([15, 18, 20]); // US
   });
+
+  it("indirim satırlarını kalemden ayırır — çift indirim olmaz (Gemini/QUICK CHINA)", () => {
+    // Gemini tipik hata: Kampanya Indirim negatif kalem + charges.discountCents ikisi birden.
+    const r = analyzeRaw(
+      {
+        meta: { currency: "TRY", locale: "tr-TR", currencyConfidence: 0.9 },
+        lineItems: [
+          { name: "260.CALIFORNIA ROLL", qty: 1, totalPriceCents: 65000, confidence: 0.9 },
+          { name: "Kampanya Indirim", totalPriceCents: -16250, confidence: 0.9 },
+          { name: "262.TRUFLU EBI TEN CRISPY ROLL", qty: 1, totalPriceCents: 70000, confidence: 0.9 },
+          { name: "Kampanya Indirim", totalPriceCents: -17500, confidence: 0.9 },
+          { name: "PIKACHU", qty: 1, totalPriceCents: 29000, confidence: 0.9 },
+        ],
+        charges: {
+          subtotalCents: 164000,
+          discountCents: 33750,
+          totalCents: 130250,
+          taxIncludedInItems: true,
+        },
+      },
+      input,
+    );
+
+    const names = r.receipt.lineItems.map((it) => it.name);
+    expect(names).not.toContain("Kampanya Indirim");
+    expect(r.receipt.charges.discountCents).toBe(33750);
+    expect(r.receipt.charges.subtotalCents).toBe(164000);
+    expect(r.arithmetic.balanced).toBe(true);
+
+    const split = computeSplit({
+      receipt: r.receipt,
+      people: [{ id: "p1", name: "Ben" }],
+      assignments: r.receipt.lineItems.map((it) => ({ lineItemId: it.id, personId: "p1" })),
+    });
+    expect(split.totalCents).toBe(130250);
+  });
+
+  it("yalnız kalem indirimi (charges.discountCents=0) → discountCents türetilir", () => {
+    const r = analyzeRaw(
+      {
+        meta: { currency: "TRY", currencyConfidence: 0.9 },
+        lineItems: [
+          { name: "CALIFORNIA ROLL", totalPriceCents: 65000, confidence: 0.9 },
+          { name: "Kampanya Indirim", totalPriceCents: -16250, confidence: 0.9 },
+          { name: "PIKACHU", totalPriceCents: 29000, confidence: 0.9 },
+        ],
+        charges: { subtotalCents: 94000, discountCents: 0, totalCents: 77750, taxIncludedInItems: true },
+      },
+      input,
+    );
+    expect(r.receipt.lineItems).toHaveLength(2);
+    expect(r.receipt.charges.discountCents).toBe(16250);
+    expect(r.arithmetic.balanced).toBe(true);
+  });
+
+  it("indirim KANITI yokken kalem/toplam farkı indirim sayılmaz (hayalet indirim önlenir)", () => {
+    // Ada Balık deseni: fişte indirim satırı yok, kalemler 7650 ama toplam 7410 okunmuş.
+    // Eski davranış aradaki 240'ı sessizce indirim sayıyordu → artık 0; dengesizlik onaya düşer.
+    const r = analyzeRaw(
+      {
+        meta: { currency: "TRY", locale: "tr-TR", currencyConfidence: 0.9 },
+        lineItems: [
+          { name: "ANTİBİYOTİK", qty: 1, totalPriceCents: 30000, confidence: 0.9 },
+          { name: "BEYAZ PEYNİR", qty: 2, totalPriceCents: 24000, confidence: 0.9 },
+          { name: "DUBLE RAKI", qty: 1, totalPriceCents: 40000, confidence: 0.9 },
+        ],
+        charges: {
+          subtotalCents: 94000,
+          discountCents: 0,
+          totalCents: 91600,
+          taxIncludedInItems: true,
+        },
+      },
+      input,
+    );
+    expect(r.receipt.charges.discountCents).toBe(0);
+    expect(r.arithmetic.balanced).toBe(false);
+    expect(r.needsConfirmation).toContain("total");
+  });
+
+  it("kalemler toplamı fiş toplamına eşitse indirim üretilmez (kanıt yok, denge tam)", () => {
+    const r = analyzeRaw(
+      {
+        meta: { currency: "TRY", locale: "tr-TR", currencyConfidence: 0.9 },
+        lineItems: [
+          { name: "ATOM", qty: 1, totalPriceCents: 26000, confidence: 0.9 },
+          { name: "ŞALGAM", qty: 1, totalPriceCents: 5000, confidence: 0.9 },
+        ],
+        charges: {
+          subtotalCents: 31000,
+          discountCents: 0,
+          totalCents: 31000,
+          taxIncludedInItems: true,
+        },
+      },
+      input,
+    );
+    expect(r.receipt.charges.discountCents).toBe(0);
+    expect(r.arithmetic.balanced).toBe(true);
+  });
+
+  it("Kampanya + SATIR IND çift kaydı → indirim bir kez sayılır (QUICK CHINA)", () => {
+    // Gerçek fiş deseni: 3× Kampanya İndirim + altta SATIR IND (aynı toplamın özeti).
+    const products = [
+      65000, 70000, 78000, 29000, 23000, 16000, 66000, 55000, 39000, 66000,
+    ];
+    const lineItems = products.flatMap((p, i) => [
+      { name: `URUN_${i}`, totalPriceCents: p, confidence: 0.9 },
+    ]);
+    lineItems.push(
+      { name: "Kampanya Indirim", totalPriceCents: -16250, confidence: 0.9 },
+      { name: "Kampanya Indirim", totalPriceCents: -17500, confidence: 0.9 },
+      { name: "Kampanya Indirim", totalPriceCents: -19500, confidence: 0.9 },
+      { name: "SATIR IND", totalPriceCents: -53250, confidence: 0.9 },
+    );
+    const productSum = products.reduce((a, b) => a + b, 0);
+    const r = analyzeRaw(
+      {
+        meta: { currency: "TRY", currencyConfidence: 0.9 },
+        lineItems,
+        charges: {
+          subtotalCents: productSum,
+          discountCents: 106500,
+          totalCents: productSum - 53250,
+          taxIncludedInItems: true,
+        },
+      },
+      input,
+    );
+    expect(r.receipt.charges.discountCents).toBe(53250);
+    expect(r.arithmetic.balanced).toBe(true);
+    expect(r.receipt.lineItems).toHaveLength(products.length);
+  });
 });

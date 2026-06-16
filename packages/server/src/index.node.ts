@@ -8,13 +8,14 @@ import { networkInterfaces } from "node:os";
 import { config as loadEnv } from "dotenv";
 import { serve } from "@hono/node-server";
 import { createApp } from "./app.js";
-import { buildProvider } from "./config.js";
+import { buildAssignmentProvider, buildProvider } from "./config.js";
 
 // packages/server/.env dosyasını yükle (Git'e sızmaz, .gitignore'da).
 loadEnv({ path: join(dirname(fileURLToPath(import.meta.url)), "../.env") });
 
 const provider = buildProvider(process.env);
-const app = createApp({ provider });
+const assignmentProvider = buildAssignmentProvider(process.env);
+const app = createApp({ provider, assignmentProvider });
 const port = Number(process.env.PORT ?? 8787);
 
 function lanAddresses(): string[] {

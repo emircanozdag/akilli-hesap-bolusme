@@ -14,6 +14,13 @@ coverage/
 *.p12
 *.key
 *.mobileprovision
+
+# Google servis hesabı anahtarları (Document AI vb.) — repoya ASLA girmez
+*-sa.json
+docai-sa.json
+service-account*.json
+docai-debug.json
+packages/server/debug/
 *.orig.*
 web-build/
 
@@ -24,3 +31,6 @@ web-build/
 # TypeScript / tooling
 *.tsbuildinfo
 .turbo/
+
+# Benchmark gerçek fiş görüntüleri (gizlilik) — fixtures/manifest repoda kalır
+packages/ai-orchestrator/bench/golden/images/

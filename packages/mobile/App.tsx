@@ -3,7 +3,7 @@
  * Adım adım: Tara → Kalemleri Onayla → Kişiler → Atama → Özet/Paylaş.
  * Altta yapışkan kişi-başı özet barı; tüm hesap @ahb/split-engine ile deterministik.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -19,9 +19,11 @@ import {
   View,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
-import type { AnalyzedReceipt } from "@ahb/ai-orchestrator";
+import type { AnalyzedReceipt, SuggestResult } from "@ahb/ai-orchestrator";
+import { clampWeightsToQty, heuristicSuggest } from "@ahb/ai-orchestrator";
 import {
   analyzeViaServer,
+  analyzeViaServerStream,
   captureFromCamera,
   checkBackendHealth,
   optimizePickedImage,
@@ -31,6 +33,7 @@ import {
   SCAN_PHASE_MESSAGES,
   type PickedUri,
   type ScanPhase,
+  type StreamItem,
 } from "./src/api";
 import { personColor, radius, useTheme, type Palette } from "./src/theme";
 import {
@@ -44,11 +47,18 @@ import {
   getItemAssignmentMeta,
   validateStep3Assignments,
 } from "./src/assignment-validation";
+import { buildSuggestInput, suggestAssignmentsViaServer } from "./src/suggest-api";
+import {
+  cloneAssignments,
+  heuristicItemIds as collectHeuristicItemIds,
+  mergeLlmSuggestion,
+} from "./src/suggest-merge";
 
 const LOCALE = "tr-TR";
 
 const STEPS = ["Fişi Tara", "Kalemler", "Kişiler", "Paylaşım", "Özet"] as const;
 type Step = 0 | 1 | 2 | 3 | 4;
+type SuggestStatus = "idle" | "loading" | "ready" | "error";
 
 let uidCounter = 0;
 const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${uidCounter++}`;
@@ -61,32 +71,6 @@ function initials(name: string): string {
   return (parts[0]![0]! + parts[1]![0]!).toLocaleUpperCase("tr");
 }
 
-/**
- * Payların toplamını kaleme ait adede (qty) sığdırır: en büyük paydan azaltarak
- * toplamı qty'ye indirir (her kişi en az 1). qty < 2 ise dokunmaz.
- */
-function clampWeightsToQty(
-  weights: Record<string, number>,
-  qty: number,
-): Record<string, number> {
-  const ids = Object.keys(weights).filter((id) => (weights[id] ?? 0) > 0);
-  if (ids.length === 0 || qty < 2) return weights;
-  const next: Record<string, number> = { ...weights };
-  let sum = ids.reduce((s, id) => s + (next[id] ?? 0), 0);
-  while (sum > qty) {
-    let maxId: string | null = null;
-    for (const id of ids) {
-      if ((next[id] ?? 0) > 1 && (maxId === null || (next[id] ?? 0) > (next[maxId] ?? 0))) {
-        maxId = id;
-      }
-    }
-    if (maxId === null) break; // hepsi 1 (kişi sayısı > adet): daha fazla kısılamaz
-    next[maxId] = (next[maxId] ?? 0) - 1;
-    sum -= 1;
-  }
-  return next;
-}
-
 function initialState(): SplitState {
   return {
     currency: "₺",
@@ -96,6 +80,7 @@ function initialState(): SplitState {
       { id: uid("p"), name: "Arkadaş", color: personColor(1) },
     ],
     assignments: {},
+    discountCents: 0,
     tax: { included: true, value: "" },
     tip: { mode: "proportional", isPercent: true, value: "" },
   };
@@ -118,6 +103,16 @@ export function App() {
   const [chargesOpen, setChargesOpen] = useState(false);
   /** true → atamalar yok sayılır, hesap kişi sayısına eşit bölünür (kısayol). */
   const [equalSplit, setEqualSplit] = useState(false);
+  const [suggestStatus, setSuggestStatus] = useState<SuggestStatus>("idle");
+  const [llmSuggestion, setLlmSuggestion] = useState<SuggestResult | null>(null);
+  const [assignmentsBeforeSuggest, setAssignmentsBeforeSuggest] = useState<
+    SplitState["assignments"] | null
+  >(null);
+  const [heuristicItemsSet, setHeuristicItemsSet] = useState<Set<string>>(() => new Set());
+  const [userEditedItems, setUserEditedItems] = useState<Set<string>>(() => new Set());
+  const [llmAppliedItemIds, setLlmAppliedItemIds] = useState<Set<string>>(() => new Set());
+  const [heuristicApplied, setHeuristicApplied] = useState(false);
+  const prefetchAbortRef = useRef<AbortController | null>(null);
 
   const computed = useMemo(
     () => computeFromState(equalSplit ? { ...state, assignments: {} } : state),
@@ -161,23 +156,131 @@ export function App() {
     void checkBackendHealth().then(setBackendOk);
   }, []);
 
+  function invalidateSuggestPrefetch() {
+    prefetchAbortRef.current?.abort();
+    prefetchAbortRef.current = null;
+    setSuggestStatus("idle");
+    setLlmSuggestion(null);
+  }
+
+  function markUserEditedItem(itemId: string) {
+    setUserEditedItems((prev) => new Set(prev).add(itemId));
+    invalidateSuggestPrefetch();
+  }
+
+  function beginStep3Suggestions(currentState: SplitState) {
+    invalidateSuggestPrefetch();
+    setUserEditedItems(new Set());
+    setLlmAppliedItemIds(new Set());
+    setAssignmentsBeforeSuggest(cloneAssignments(currentState.assignments));
+
+    const input = buildSuggestInput(currentState, LOCALE);
+    const heuristic = heuristicSuggest(input);
+    const hIds = collectHeuristicItemIds(heuristic);
+    setHeuristicItemsSet(hIds);
+    setHeuristicApplied(hIds.size > 0);
+
+    setState((prev) => ({
+      ...prev,
+      assignments: { ...prev.assignments, ...heuristic.assignments },
+    }));
+
+    setSuggestStatus("loading");
+    const controller = new AbortController();
+    prefetchAbortRef.current = controller;
+
+    void suggestAssignmentsViaServer(input, controller.signal)
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        setLlmSuggestion(result);
+        setSuggestStatus("ready");
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return;
+        if (typeof __DEV__ !== "undefined" && __DEV__) {
+          console.warn("[ahb] suggest prefetch failed", err);
+        }
+        setSuggestStatus("error");
+      });
+  }
+
+  function applyLlmSuggestion() {
+    if (!llmSuggestion) return;
+    const merged = mergeLlmSuggestion({
+      current: state.assignments,
+      llm: llmSuggestion,
+      heuristicItems: heuristicItemsSet,
+      userEditedItems,
+    });
+    setState((prev) => ({ ...prev, assignments: merged.assignments }));
+    setLlmAppliedItemIds(new Set(merged.appliedItemIds));
+    setLlmSuggestion(null);
+    setSuggestStatus("idle");
+  }
+
+  function dismissLlmSuggestion() {
+    setLlmSuggestion(null);
+    setSuggestStatus("idle");
+  }
+
+  function undoSuggestions() {
+    if (assignmentsBeforeSuggest) {
+      setState((prev) => ({
+        ...prev,
+        assignments: cloneAssignments(assignmentsBeforeSuggest),
+      }));
+    }
+    setHeuristicItemsSet(new Set());
+    setUserEditedItems(new Set());
+    setLlmAppliedItemIds(new Set());
+    setHeuristicApplied(false);
+    setAssignmentsBeforeSuggest(null);
+    invalidateSuggestPrefetch();
+  }
+
   // --- Eylemler -----------------------------------------------------------
 
   async function runScan(picker: () => Promise<PickedUri | null>) {
     setBanner(null);
     setScanPhase("picking");
+    // Kullanıcı kamerada fişi çerçeveler/kırparken backend bağlantısını ısıt
+    // (TCP/TLS + sağlayıcı warm) → görüntü hazır olunca ilk istek hızlı gider.
+    prewarmBackend();
     try {
       const picked = await picker();
       if (!picked) {
         setScanPhase("idle");
         return;
       }
-      setScanPhase("preparing");
       setStep(1);
+      setScanPhase("preparing");
       const image = await optimizePickedImage(picked);
-      setScanPhase("uploading");
       setScanPhase("analyzing");
-      const result = await analyzeViaServer(image, LOCALE);
+
+      // Akışlı yol: kalemler geldikçe listeyi canlı doldur (algılanan hız). Akış
+      // başarısız olursa (eski sunucu / ağ) tek-seferlik analize sessizce düş.
+      let result: AnalyzedReceipt;
+      try {
+        const streamed: StreamItem[] = [];
+        result = await analyzeViaServerStream(image, LOCALE, (item) => {
+          streamed.push(item);
+          setState((prev) => ({
+            ...prev,
+            items: streamed.map((it, i) => ({
+              id: `li_stream_${i}`,
+              name: it.name ?? "",
+              price: it.totalPriceCents != null ? formatCents(it.totalPriceCents) : "",
+              qty: Math.max(1, Math.round(it.qty ?? 1)),
+            })),
+          }));
+        });
+      } catch (streamErr) {
+        if (typeof __DEV__ !== "undefined" && __DEV__) {
+          console.warn("[ahb] akış başarısız, tek-seferliğe düşülüyor", streamErr);
+        }
+        result = await analyzeViaServer(image, LOCALE);
+      }
+
       setAnalysis(result);
       setState((prev) => analyzedToState(result, prev.people));
       const count = result.receipt.lineItems.length;
@@ -201,12 +304,18 @@ export function App() {
   }
 
   function resetAll() {
+    invalidateSuggestPrefetch();
     setState(initialState());
     setAnalysis(null);
     setBanner(null);
     setExpandedItemId(null);
     setChargesOpen(false);
     setEqualSplit(false);
+    setHeuristicItemsSet(new Set());
+    setUserEditedItems(new Set());
+    setLlmAppliedItemIds(new Set());
+    setHeuristicApplied(false);
+    setAssignmentsBeforeSuggest(null);
     setScanPhase("idle");
     setStep(0);
   }
@@ -274,6 +383,7 @@ export function App() {
   }
 
   function toggleAssign(itemId: string, personId: string) {
+    markUserEditedItem(itemId);
     setState((prev) => {
       const current = prev.assignments[itemId] ?? {};
       const next = { ...current };
@@ -288,6 +398,7 @@ export function App() {
    * payların toplamı adisyondaki adedi AŞAMAZ.
    */
   function setWeight(itemId: string, personId: string, delta: number) {
+    markUserEditedItem(itemId);
     setState((prev) => {
       const current = prev.assignments[itemId] ?? {};
       const item = prev.items.find((it) => it.id === itemId);
@@ -357,8 +468,13 @@ export function App() {
         return;
       }
     }
-    // Kişilerden normal devam = kalem kalem mod.
-    if (step === 2) setEqualSplit(false);
+    // Kişilerden normal devam = kalem kalem mod; Adım 3'te heuristik + LLM prefetch.
+    if (step === 2) {
+      setEqualSplit(false);
+      beginStep3Suggestions(state);
+      setStep(3);
+      return;
+    }
     setStep((s) => Math.min(4, s + 1) as Step);
   }
 
@@ -374,6 +490,7 @@ export function App() {
       setStep(2);
       return;
     }
+    if (step === 3) invalidateSuggestPrefetch();
     setStep((s) => Math.max(0, s - 1) as Step);
   }
 
@@ -646,6 +763,44 @@ export function App() {
               <Text style={styles.sectionHint}>
                 Her kalem için alan kişileri seç. Seçilmeyenler herkese eşit bölünür.
               </Text>
+              {heuristicApplied && (
+                <View style={[styles.banner, styles.bannerOk, styles.suggestStrip]}>
+                  <Text style={styles.bannerText}>Otomatik öneriler uygulandı</Text>
+                  {assignmentsBeforeSuggest && (
+                    <Pressable onPress={undoSuggestions} hitSlop={8}>
+                      <Text style={styles.link}>Geri al</Text>
+                    </Pressable>
+                  )}
+                </View>
+              )}
+              {suggestStatus === "loading" && (
+                <View style={[styles.banner, styles.suggestStrip, styles.suggestLoadingRow]}>
+                  <ActivityIndicator size="small" color={colors.primary} />
+                  <Text style={styles.bannerText}>AI önerisi hazırlanıyor…</Text>
+                </View>
+              )}
+              {suggestStatus === "ready" && llmSuggestion && (
+                <View style={[styles.banner, styles.bannerOk, styles.suggestStrip]}>
+                  <Text style={styles.bannerText}>
+                    {llmSuggestion.partial
+                      ? "AI önerisi hazır — bazı kalemler belirsiz"
+                      : "AI önerisi hazır"}
+                  </Text>
+                  <View style={styles.suggestActions}>
+                    <Pressable style={[styles.btn, styles.btnPrimary, styles.btnCompact]} onPress={applyLlmSuggestion}>
+                      <Text style={styles.btnPrimaryText}>Uygula</Text>
+                    </Pressable>
+                    <Pressable style={[styles.btn, styles.btnGhost, styles.btnCompact]} onPress={dismissLlmSuggestion}>
+                      <Text style={styles.btnGhostText}>Yoksay</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              )}
+              {suggestStatus === "error" && (
+                <View style={[styles.banner, styles.bannerWarn, styles.suggestStrip]}>
+                  <Text style={styles.bannerText}>AI önerisi alınamadı — elle atayabilirsiniz</Text>
+                </View>
+              )}
               <Pressable onPress={goEqualSplit} hitSlop={8}>
                 <Text style={styles.link}>Atamayla uğraşma — hepsini eşit böl</Text>
               </Pressable>
@@ -664,7 +819,11 @@ export function App() {
                   return (
                     <View
                       key={item.id}
-                      style={[styles.itemRow, needsQtyAttention && styles.itemRowQtyWarn]}
+                      style={[
+                        styles.itemRow,
+                        needsQtyAttention && styles.itemRowQtyWarn,
+                        llmAppliedItemIds.has(item.id) && styles.itemRowSuggested,
+                      ]}
                     >
                       <View style={styles.itemHead}>
                         <View style={styles.rowFlex}>
@@ -720,6 +879,12 @@ export function App() {
 
                       {assignedIds.length === 0 && (
                         <Text style={styles.unassignedHint}>Atanmadı — herkese eşit bölünür.</Text>
+                      )}
+
+                      {item.qty === 1 && assignedIds.length >= 1 && (
+                        <Text style={styles.unassignedHint}>
+                          1 adet — seçilenler arasında eşit bölünür.
+                        </Text>
                       )}
 
                       {needsQtyAttention && (
@@ -850,6 +1015,16 @@ export function App() {
                       );
                     })}
                   </View>
+
+                  {computed.discountCents > 0 && (
+                    <View style={styles.totalRow}>
+                      <Text style={styles.dim}>İndirim (oransal)</Text>
+                      <Text style={styles.dim}>
+                        −{state.currency}
+                        {formatCents(computed.discountCents)}
+                      </Text>
+                    </View>
+                  )}
 
                   <View style={styles.totalRow}>
                     <Text style={styles.totalLabel}>Toplam</Text>
@@ -1194,6 +1369,30 @@ function makeStyles(c: Palette) {
     qtyWarnBanner: { marginHorizontal: 14, marginBottom: 4, gap: 2 },
     qtyWarnSub: { color: c.textDim, fontSize: 12 },
     qtyOkBanner: { marginHorizontal: 14, marginBottom: 4, paddingVertical: 8 },
+    itemRowSuggested: {
+      borderColor: c.primary,
+      borderWidth: 1,
+    },
+    suggestStrip: {
+      marginHorizontal: 16,
+      marginBottom: 8,
+      gap: 8,
+    },
+    suggestLoadingRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+    },
+    suggestActions: {
+      flexDirection: "row",
+      gap: 8,
+      flexWrap: "wrap",
+    },
+    btnCompact: {
+      paddingVertical: 8,
+      paddingHorizontal: 14,
+      minWidth: 0,
+    },
 
     // Pay ayarı
     weights: {

@@ -1,0 +1,35 @@
+{
+  "$comment": "Altın-set manifest. Her vaka ya 'imagePath' (gerçek sağlayıcıyla koşulur) ya da 'rawFixture' (önceden yakalanmış ham çıktı; ağ/anahtar gerekmez) içerir. Gerçek fişler eklemek için: görüntüyü golden/images/ altına koy, imagePath ver, expected'i elle etiketle. Detay için README.md.",
+  "cases": [
+    {
+      "id": "sample-vat-included",
+      "rawFixture": "fixtures/sample.json",
+      "locale": "tr-TR",
+      "expected": {
+        "currency": "TRY",
+        "totalCents": 4300,
+        "items": [
+          { "name": "Steak", "totalPriceCents": 2500 },
+          { "name": "Salata", "totalPriceCents": 800 },
+          { "name": "Paylaşılan meze", "totalPriceCents": 1000 }
+        ]
+      }
+    },
+    {
+      "id": "perkins-discount",
+      "rawFixture": "fixtures/perkins.json",
+      "locale": "tr-TR",
+      "expected": {
+        "currency": "TRY",
+        "totalCents": 5040,
+        "items": [
+          { "name": "NEW MEXICO OZEL", "totalPriceCents": 1400 },
+          { "name": "PAPAYA-TAVUK", "totalPriceCents": 900 },
+          { "name": "PAPAYA-BIFTEK", "totalPriceCents": 1400 },
+          { "name": "BURITTOS-TAVUK", "totalPriceCents": 900 },
+          { "name": "HARDTACO-TAVUK", "totalPriceCents": 1000 }
+        ]
+      }
+    }
+  ]
+}

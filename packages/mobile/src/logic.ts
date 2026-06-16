@@ -52,6 +52,8 @@ export interface SplitState {
   assignments: Record<string, Record<string, number>>;
   tax: TaxState;
   tip: TipState;
+  /** Fişten yakalanan toplam indirim (kuruş, pozitif). Kalem tabanına oransal düşülür. */
+  discountCents: Cents;
 }
 
 export interface ComputedSplit {
@@ -59,6 +61,7 @@ export interface ComputedSplit {
   subtotalCents: Cents;
   taxCents: Cents;
   tipCents: Cents;
+  discountCents: Cents;
   grandTotalCents: Cents;
 }
 
@@ -97,6 +100,8 @@ export function computeFromState(state: SplitState): ComputedSplit | null {
 
   const subtotalCents = buildSubtotal(state.items);
   const taxCents = state.tax.included ? 0 : safeToCents(state.tax.value);
+  // İndirim ara toplamı aşamaz (negatif fiş engellenir).
+  const discountCents = Math.min(Math.max(0, state.discountCents), subtotalCents);
 
   const tipCents = state.tip.isPercent
     ? percentOf(subtotalCents, state.tip.value)
@@ -114,9 +119,9 @@ export function computeFromState(state: SplitState): ComputedSplit | null {
         subtotalCents,
         taxCents,
         serviceChargeCents: 0,
-        discountCents: 0,
+        discountCents,
         tipCents,
-        totalCents: subtotalCents + taxCents + tipCents,
+        totalCents: subtotalCents - discountCents + taxCents + tipCents,
         taxIncludedInItems: state.tax.included,
       },
     },
@@ -131,7 +136,14 @@ export function computeFromState(state: SplitState): ComputedSplit | null {
     unassignedStrategy: "equal",
   });
 
-  return { result, subtotalCents, taxCents, tipCents, grandTotalCents: result.totalCents };
+  return {
+    result,
+    subtotalCents,
+    taxCents,
+    tipCents,
+    discountCents,
+    grandTotalCents: result.totalCents,
+  };
 }
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
@@ -153,7 +165,6 @@ export function currencySymbol(code?: string): string {
  */
 export function analyzedToState(analyzed: AnalyzedReceipt, prevPeople: PersonRow[]): SplitState {
   const { receipt, meta } = analyzed;
-  const suggestedTip = analyzed.regional.suggestedTipPercentages[0];
   return {
     currency: currencySymbol(meta.currency),
     people: prevPeople,
@@ -164,18 +175,17 @@ export function analyzedToState(analyzed: AnalyzedReceipt, prevPeople: PersonRow
       qty: Math.max(1, Math.round(li.qty || 1)),
     })),
     assignments: {},
+    discountCents: receipt.charges.discountCents,
     tax: {
       included: receipt.charges.taxIncludedInItems,
       value: receipt.charges.taxIncludedInItems ? "" : formatCents(receipt.charges.taxCents),
     },
+    // Bahşiş varsayılanı 0 (boş): fişte bahşiş yazılıysa onu kullan, aksi halde kullanıcı
+    // dilerse kendi girsin — bölgesel öneriyle otomatik doldurmuyoruz.
     tip:
       receipt.charges.tipCents > 0
         ? { mode: "proportional", isPercent: false, value: formatCents(receipt.charges.tipCents) }
-        : {
-            mode: "proportional",
-            isPercent: true,
-            value: suggestedTip !== undefined ? String(suggestedTip) : "",
-          },
+        : { mode: "proportional", isPercent: true, value: "" },
   };
 }
 

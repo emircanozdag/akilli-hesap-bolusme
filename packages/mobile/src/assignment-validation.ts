@@ -47,8 +47,10 @@ export function getItemAssignmentMeta(
   const atCap = capEnforced && totalUnits >= qty;
   const needsQtyAttention = capEnforced && assignedIds.length >= 1 && remaining > 0;
   const qtyFullyAllocated = capEnforced && assignedIds.length >= 1 && remaining === 0;
+  // Pay/adet sayaçları yalnızca qty ≥ 2 kalemlerde (9 su → 5+4 gibi). Tek adet: kişi seçimi yeterli.
   const showWeightSteppers =
-    assignedIds.length >= 2 || (assignedIds.length >= 1 && remaining > 0);
+    capEnforced &&
+    (assignedIds.length >= 2 || (assignedIds.length >= 1 && remaining > 0));
   return {
     assignedIds,
     totalUnits,

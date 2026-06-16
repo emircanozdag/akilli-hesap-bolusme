@@ -14,6 +14,7 @@ function baseState(overrides: Partial<SplitState> = {}): SplitState {
       { id: "p2", name: "Arkadaş", color: "#3ecf8e" },
     ],
     assignments: {},
+    discountCents: 0,
     tax: { included: true, value: "" },
     tip: { mode: "proportional", isPercent: true, value: "" },
     ...overrides,
@@ -35,10 +36,11 @@ describe("getItemAssignmentMeta", () => {
     expect(meta.qtyFullyAllocated).toBe(true);
   });
 
-  it("1 adet → cap uygulanmaz", () => {
+  it("1 adet → cap uygulanmaz, pay sayacı gösterilmez", () => {
     const meta = getItemAssignmentMeta(1, { p1: 1, p2: 1 });
     expect(meta.capEnforced).toBe(false);
     expect(meta.needsQtyAttention).toBe(false);
+    expect(meta.showWeightSteppers).toBe(false);
   });
 });
 

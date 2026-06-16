@@ -4,8 +4,13 @@
  * SDK'ya bağımlı kalmamak için doğrudan REST (fetch) kullanır → her runtime'da çalışır
  * (Cloudflare Workers dahil). Anahtar yalnızca backend'de bulunur (§9.2).
  */
-import { ProviderError, SYSTEM_INSTRUCTION, type VisionProvider } from "../provider.js";
+import {
+  ProviderError,
+  SYSTEM_INSTRUCTION,
+  type StreamingVisionProvider,
+} from "../provider.js";
 import { geminiResponseSchema } from "../schema.js";
+import { consumeSseBuffer, extractLineItems, type PartialLineItem } from "../partial-json.js";
 import type { AnalyzeInput } from "../types.js";
 
 export interface GeminiOptions {
@@ -40,7 +45,7 @@ type ModelAttempt =
   | { ok: true; value: unknown }
   | { ok: false; error: ProviderError; retryable: boolean };
 
-export class GeminiProvider implements VisionProvider {
+export class GeminiProvider implements StreamingVisionProvider {
   readonly name = "gemini";
   /** Birincil + yedek modeller, denenme sırasıyla. */
   private readonly models: string[];
@@ -62,8 +67,8 @@ export class GeminiProvider implements VisionProvider {
     this.sleepImpl = opts.sleepImpl ?? defaultSleep;
   }
 
-  async analyze(input: AnalyzeInput): Promise<unknown> {
-    const body = {
+  private buildBody(input: AnalyzeInput): unknown {
+    return {
       system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
       contents: [
         {
@@ -77,8 +82,14 @@ export class GeminiProvider implements VisionProvider {
         responseMimeType: "application/json",
         responseSchema: geminiResponseSchema,
         temperature: 0,
+        // 2.5-flash "düşünme" tokenları gecikmeyi artırır; fiş OCR'da gereksiz.
+        thinkingConfig: { thinkingBudget: 0 },
       },
     };
+  }
+
+  async analyze(input: AnalyzeInput): Promise<unknown> {
+    const body = this.buildBody(input);
 
     let lastError: ProviderError | undefined;
 
@@ -155,6 +166,78 @@ export class GeminiProvider implements VisionProvider {
     if (attempt >= this.maxAttempts) return false;
     await this.sleepImpl(this.retryBaseDelayMs * 2 ** (attempt - 1));
     return true;
+  }
+
+  /**
+   * Akışlı tarama: streamGenerateContent (alt=sse) ile JSON parça parça gelir; her yeni
+   * tamamlanan kalem `onItem` ile bildirilir. Yedek model zinciri YOKtur (hız için yalnız
+   * birincil model); hata olursa çağıran tarafın tek-seferlik yola düşmesi beklenir.
+   * Dönüş: tam ham JSON (nihai doğrulama pipeline'da).
+   */
+  async analyzeStream(
+    input: AnalyzeInput,
+    onItem: (item: PartialLineItem) => void,
+  ): Promise<unknown> {
+    const model = this.models[0]!;
+    const url = `${this.baseUrl}/models/${model}:streamGenerateContent?alt=sse&key=${this.opts.apiKey}`;
+
+    let res: Response;
+    try {
+      res = await this.fetchImpl(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(this.buildBody(input)),
+        signal: AbortSignal.timeout(GEMINI_REQUEST_TIMEOUT_MS),
+      });
+    } catch (cause) {
+      throw new ProviderError(`Gemini akış isteği başarısız (ağ, ${model})`, "gemini", cause);
+    }
+
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new ProviderError(`Gemini HTTP ${res.status} (${model}): ${detail.slice(0, 300)}`, "gemini");
+    }
+    if (!res.body) {
+      throw new ProviderError("Gemini akış gövdesi boş", "gemini");
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let sseBuffer = "";
+    let accText = "";
+    let emitted = 0;
+
+    const flushItems = (): void => {
+      const items = extractLineItems(accText);
+      for (let k = emitted; k < items.length; k++) onItem(items[k]!);
+      emitted = items.length;
+    };
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sseBuffer += decoder.decode(value, { stream: true });
+      const { text, rest } = consumeSseBuffer(sseBuffer);
+      sseBuffer = rest;
+      if (text) {
+        accText += text;
+        flushItems();
+      }
+    }
+    // Kalan tampondaki son satırları da işle (newline ile bitmemiş olabilir).
+    if (sseBuffer) {
+      const { text } = consumeSseBuffer(sseBuffer + "\n");
+      if (text) {
+        accText += text;
+        flushItems();
+      }
+    }
+
+    try {
+      return JSON.parse(accText);
+    } catch (cause) {
+      throw new ProviderError("Gemini akış JSON'u ayrıştırılamadı", "gemini", cause);
+    }
   }
 }
 

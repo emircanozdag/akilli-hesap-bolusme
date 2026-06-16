@@ -16,13 +16,15 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bench": "node --import tsx bench/run.ts"
   },
   "dependencies": {
     "@ahb/split-engine": "*",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "tsx": "^4.17.0",
     "typescript": "^5.5.4",
     "vitest": "^2.0.5"
   }

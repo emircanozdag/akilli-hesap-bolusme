@@ -1,34 +1,21 @@
 /**
  * Fiş tarama istemcisi — backend (/analyze) ile konuşur (DESIGN.md §6.2).
  */
-import Constants from "expo-constants";
 import * as ImagePicker from "expo-image-picker";
 import type { AnalyzedReceipt } from "@ahb/ai-orchestrator";
 import { prepareImageForUpload } from "./image-optimize";
 import { fetchWithTimeout } from "./fetch-timeout";
+import { deviceId, resolveApiBase } from "./api-base";
 
-const BACKEND_PORT = 8787;
-const ANALYZE_TIMEOUT_MS = 120_000;
+export { resolveApiBase } from "./api-base";
 
-export function resolveApiBase(): string {
-  const override = process.env.EXPO_PUBLIC_AHB_API;
-  if (override && override.length > 0) return override.replace(/\/$/, "");
-
-  const hostUri =
-    Constants.expoConfig?.hostUri ??
-    (Constants as unknown as { expoGoConfig?: { debuggerHost?: string } }).expoGoConfig
-      ?.debuggerHost;
-
-  if (hostUri) {
-    const host = hostUri.split(":")[0];
-    if (host) return `http://${host}:${BACKEND_PORT}`;
-  }
-  return `http://localhost:${BACKEND_PORT}`;
-}
+const ANALYZE_TIMEOUT_MS = 90_000;
 
 export interface PickedImage {
   base64: string;
   mimeType: string;
+  /** Optimize edilmiş dosyanın yerel URI'si — binary (base64'süz) upload için. */
+  uri?: string;
 }
 
 export type ScanPhase = "idle" | "picking" | "preparing" | "uploading" | "analyzing";
@@ -49,9 +36,11 @@ export async function captureFromCamera(): Promise<PickedUri | null> {
   if (!perm.granted) {
     throw new Error("Kamera izni verilmedi. Ayarlardan izin verebilirsin.");
   }
+  // allowsEditing: çekim sonrası yerleşik kırp-yakınlaştır adımı; kullanıcı yalnızca fişi
+  // çerçeveler → arka plan gürültüsü (tarayıcı/menü) silinir, fiş kareyi doldurunca etkin DPI artar.
   const result = await ImagePicker.launchCameraAsync({
     base64: false,
-    allowsEditing: false,
+    allowsEditing: true,
   });
   return toPickedUri(result);
 }
@@ -60,7 +49,7 @@ export async function pickFromLibrary(): Promise<PickedUri | null> {
   const result = await ImagePicker.launchImageLibraryAsync({
     base64: false,
     mediaTypes: ["images"],
-    allowsEditing: false,
+    allowsEditing: true,
   });
   return toPickedUri(result);
 }
@@ -78,6 +67,36 @@ export async function optimizePickedImage(picked: PickedUri): Promise<PickedImag
   return prepareImageForUpload(picked.uri);
 }
 
+/**
+ * Sunucuya yüklenecek isteği kurar. Mümkünse BINARY yol (optimize edilmiş dosyanın
+ * URI'sinden blob) → base64'ün +%33 şişmesi ve JSON serileştirme maliyeti kalkar.
+ * URI yoksa ya da blob okunamazsa base64 JSON'a düşer (geriye dönük uyum).
+ */
+async function buildAnalyzeRequest(image: PickedImage, locale: string): Promise<RequestInit> {
+  if (image.uri) {
+    try {
+      const fileRes = await fetch(image.uri);
+      const blob = await fileRes.blob();
+      return {
+        method: "POST",
+        headers: {
+          "content-type": image.mimeType,
+          "x-device-id": deviceId(),
+          "x-locale": locale,
+        },
+        body: blob,
+      };
+    } catch {
+      // Blob okunamadı → base64 JSON'a düş.
+    }
+  }
+  return {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-device-id": deviceId() },
+    body: JSON.stringify({ imageBase64: image.base64, mimeType: image.mimeType, locale }),
+  };
+}
+
 export async function analyzeViaServer(
   image: PickedImage,
   locale: string,
@@ -87,17 +106,11 @@ export async function analyzeViaServer(
     console.log(`[ahb] analyze → ${url}`);
   }
 
+  const init = await buildAnalyzeRequest(image, locale);
+
   let res: Response;
   try {
-    res = await fetchWithTimeout(
-      url,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-device-id": deviceId() },
-        body: JSON.stringify({ imageBase64: image.base64, mimeType: image.mimeType, locale }),
-      },
-      ANALYZE_TIMEOUT_MS,
-    );
+    res = await fetchWithTimeout(url, init, ANALYZE_TIMEOUT_MS);
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
       throw new Error("Fiş okuma zaman aşımına uğradı. Tekrar dener misin?");
@@ -117,6 +130,114 @@ export async function analyzeViaServer(
   return (await res.json()) as AnalyzedReceipt;
 }
 
+/**
+ * Çekilen görüntüyü tek eager zincirde işler: optimize → analiz. Faz geçişlerini
+ * `onPhase` ile bildirir. Çağıran (App), pick biter bitmez bunu başlatır → optimize
+ * ve upload, UI adım geçişlerini beklemeden hemen akar (algılanan gecikme azalır).
+ */
+export async function scanReceipt(
+  picked: PickedUri,
+  locale: string,
+  onPhase?: (phase: Exclude<ScanPhase, "idle" | "picking">) => void,
+): Promise<AnalyzedReceipt> {
+  onPhase?.("preparing");
+  const image = await optimizePickedImage(picked);
+  onPhase?.("uploading");
+  onPhase?.("analyzing");
+  return analyzeViaServer(image, locale);
+}
+
+/** Akışlı taramada UI'ya anlık gösterilecek kısmi kalem. */
+export interface StreamItem {
+  name?: string;
+  qty?: number;
+  totalPriceCents?: number;
+  confidence?: number;
+}
+
+/**
+ * Akışlı tarama (SSE): kalemler geldikçe `onItem` çağrılır, sonda doğrulanmış tam
+ * sonuç döner. RN'de fetch akışı güvenilir olmadığından XMLHttpRequest + onprogress
+ * ile SSE çözümlenir. Herhangi bir sorunda çağıran tek-seferlik scanReceipt'e düşmeli.
+ */
+export function analyzeViaServerStream(
+  image: PickedImage,
+  locale: string,
+  onItem: (item: StreamItem) => void,
+): Promise<AnalyzedReceipt> {
+  const url = `${resolveApiBase()}/analyze/stream`;
+  return buildAnalyzeRequest(image, locale).then(
+    (init) =>
+      new Promise<AnalyzedReceipt>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", url);
+        const headers = init.headers as Record<string, string> | undefined;
+        if (headers) {
+          for (const [k, v] of Object.entries(headers)) {
+            if (typeof v === "string") xhr.setRequestHeader(k, v);
+          }
+        }
+        xhr.timeout = ANALYZE_TIMEOUT_MS;
+
+        let cursor = 0;
+        let finalResult: AnalyzedReceipt | null = null;
+        let streamError: string | null = null;
+
+        const handleEvent = (event: string, data: string) => {
+          if (!data) return;
+          if (event === "item") {
+            try {
+              onItem(JSON.parse(data) as StreamItem);
+            } catch {
+              /* yarım/parçalı kalem → yok say */
+            }
+          } else if (event === "result") {
+            try {
+              finalResult = JSON.parse(data) as AnalyzedReceipt;
+            } catch {
+              streamError = "Sonuç çözümlenemedi";
+            }
+          } else if (event === "error") {
+            try {
+              streamError = (JSON.parse(data) as { error?: string }).error ?? "AI hatası";
+            } catch {
+              streamError = "AI hatası";
+            }
+          }
+        };
+
+        const drain = () => {
+          const text = xhr.responseText;
+          const blocks = text.slice(cursor).split("\n\n");
+          for (let b = 0; b < blocks.length - 1; b++) {
+            const block = blocks[b]!;
+            let event = "message";
+            let data = "";
+            for (const line of block.split("\n")) {
+              if (line.startsWith("event:")) event = line.slice(6).trim();
+              else if (line.startsWith("data:")) data += line.slice(5).trim();
+            }
+            handleEvent(event, data);
+          }
+          cursor += blocks.slice(0, blocks.length - 1).join("\n\n").length;
+          if (blocks.length > 1) cursor += "\n\n".length * (blocks.length - 1);
+        };
+
+        xhr.onprogress = drain;
+        xhr.onload = () => {
+          drain();
+          if (finalResult) resolve(finalResult);
+          else reject(new Error(streamError ?? `Sunucu hatası (${xhr.status})`));
+        };
+        xhr.onerror = () => reject(new Error("Sunucuya ulaşılamadı (akış)."));
+        xhr.ontimeout = () =>
+          reject(new Error("Fiş okuma zaman aşımına uğradı. Tekrar dener misin?"));
+
+        xhr.send(init.body as Blob | string | null);
+      }),
+  );
+}
+
 export async function checkBackendHealth(): Promise<boolean> {
   const url = `${resolveApiBase()}/health`;
   try {
@@ -129,13 +250,4 @@ export async function checkBackendHealth(): Promise<boolean> {
 
 export function prewarmBackend(): void {
   void checkBackendHealth();
-}
-
-let cachedDeviceId: string | null = null;
-function deviceId(): string {
-  if (cachedDeviceId) return cachedDeviceId;
-  const sessionId = (Constants as unknown as { sessionId?: string }).sessionId;
-  cachedDeviceId =
-    sessionId ?? `ahb-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
-  return cachedDeviceId;
 }

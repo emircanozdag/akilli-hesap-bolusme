@@ -1,0 +1,26 @@
+{
+  "meta": {
+    "merchant": "Perkins Family Restaurant — Üsküdar",
+    "date": "2011-07-29",
+    "currency": "TRY",
+    "locale": "tr-TR",
+    "language": "tr",
+    "currencyConfidence": 0.97
+  },
+  "lineItems": [
+    { "name": "NEW MEXICO OZEL", "qty": 1, "totalPriceCents": 1400, "confidence": 0.95, "flags": [] },
+    { "name": "PAPAYA-TAVUK", "qty": 1, "totalPriceCents": 900, "confidence": 0.95, "flags": [] },
+    { "name": "PAPAYA-BIFTEK", "qty": 1, "totalPriceCents": 1400, "confidence": 0.95, "flags": [] },
+    { "name": "BURITTOS-TAVUK", "qty": 1, "totalPriceCents": 900, "confidence": 0.95, "flags": [] },
+    { "name": "HARDTACO-TAVUK", "qty": 1, "totalPriceCents": 1000, "confidence": 0.95, "flags": [] }
+  ],
+  "charges": {
+    "subtotalCents": 5600,
+    "taxCents": 0,
+    "serviceChargeCents": 0,
+    "discountCents": 560,
+    "tipCents": 0,
+    "totalCents": 5040,
+    "taxIncludedInItems": true
+  }
+}

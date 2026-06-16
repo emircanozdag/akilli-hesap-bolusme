@@ -16,7 +16,7 @@ describe("prepareImageForUpload", () => {
     manipulateAsync.mockReset();
   });
 
-  it("1400px genişlik ve 0.55 sıkıştırma ile JPEG üretir", async () => {
+  it("dengeli çözünürlük + düşük sıkıştırma ile JPEG üretir (uri dahil)", async () => {
     manipulateAsync.mockResolvedValue({
       base64: "Zm9v",
       uri: "file:///optimized.jpg",
@@ -33,7 +33,7 @@ describe("prepareImageForUpload", () => {
         base64: true,
       },
     );
-    expect(result).toEqual({ base64: "Zm9v", mimeType: "image/jpeg" });
+    expect(result).toEqual({ base64: "Zm9v", mimeType: "image/jpeg", uri: "file:///optimized.jpg" });
   });
 
   it("boş URI → hata", async () => {

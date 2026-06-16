@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # ai-orchestrator dist'i server/mobile tip çözümlemesi için gerekli.
+      - run: npm run build -w @ahb/ai-orchestrator
+      - run: npm run typecheck
+      - run: npm test
+      # Tarama benchmark harness'ı (ağsız fixture vakaları) — F1 eşiği altına düşersek hata.
+      - name: Bench (fixture self-test)
+        run: npm run bench -w @ahb/ai-orchestrator
+        env:
+          AHB_BENCH_MIN_F1: "0.9"
