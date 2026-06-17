@@ -32,6 +32,7 @@ import {
   resolveApiBase,
   SCAN_PHASE_MESSAGES,
   type PickedUri,
+  type PickedImage,
   type ScanPhase,
   type StreamItem,
 } from "./src/api";
@@ -53,6 +54,16 @@ import {
   heuristicItemIds as collectHeuristicItemIds,
   mergeLlmSuggestion,
 } from "./src/suggest-merge";
+import { HistoryModal } from "./src/HistoryModal";
+import { HistoryHomeTeaser } from "./src/HistoryHomeTeaser";
+import {
+  getHistoryStore,
+  hashImageBase64,
+  type ReceiptStatus,
+  type ReceiptSummary,
+} from "./src/history/index";
+import type { HistoryStore } from "./src/history/store";
+import { useReceiptAutosave } from "./src/useReceiptAutosave";
 
 const LOCALE = "tr-TR";
 
@@ -113,6 +124,14 @@ export function App() {
   const [llmAppliedItemIds, setLlmAppliedItemIds] = useState<Set<string>>(() => new Set());
   const [heuristicApplied, setHeuristicApplied] = useState(false);
   const prefetchAbortRef = useRef<AbortController | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyRefreshToken, setHistoryRefreshToken] = useState(0);
+  const [activeReceiptId, setActiveReceiptId] = useState<string | null>(null);
+  const [receiptStatus, setReceiptStatus] = useState<ReceiptStatus>("draft");
+  const [persistedImageHash, setPersistedImageHash] = useState<string | undefined>();
+  const [shareTextSnapshot, setShareTextSnapshot] = useState<string | undefined>();
+  const [receiptCreatedAt, setReceiptCreatedAt] = useState<string | undefined>();
+  const [historyStore, setHistoryStore] = useState<HistoryStore | null>(null);
 
   const computed = useMemo(
     () => computeFromState(equalSplit ? { ...state, assignments: {} } : state),
@@ -154,7 +173,26 @@ export function App() {
   useEffect(() => {
     prewarmBackend();
     void checkBackendHealth().then(setBackendOk);
+    void getHistoryStore().then(setHistoryStore);
   }, []);
+
+  useEffect(() => {
+    if (step === 0) setHistoryRefreshToken((t) => t + 1);
+  }, [step]);
+
+  const { flush: flushHistory, resetSnapshot: resetHistorySnapshot } = useReceiptAutosave({
+    store: historyStore,
+    activeReceiptId,
+    state,
+    step,
+    equalSplit,
+    status: receiptStatus,
+    analysis,
+    imageHash: persistedImageHash,
+    shareText: shareTextSnapshot,
+    createdAt: receiptCreatedAt,
+    onIdAssigned: setActiveReceiptId,
+  });
 
   function invalidateSuggestPrefetch() {
     prefetchAbortRef.current?.abort();
@@ -240,25 +278,42 @@ export function App() {
 
   // --- Eylemler -----------------------------------------------------------
 
-  async function runScan(picker: () => Promise<PickedUri | null>) {
-    setBanner(null);
-    setScanPhase("picking");
-    // Kullanıcı kamerada fişi çerçeveler/kırparken backend bağlantısını ısıt
-    // (TCP/TLS + sağlayıcı warm) → görüntü hazır olunca ilk istek hızlı gider.
-    prewarmBackend();
+  async function loadReceiptFromHistory(summary: ReceiptSummary) {
+    const store = await getHistoryStore();
+    const saved = await store.load(summary.id);
+    if (!saved) {
+      Alert.alert("Kayıt bulunamadı", "Bu fiş geçmişten silinmiş olabilir.");
+      return;
+    }
+    invalidateSuggestPrefetch();
+    resetHistorySnapshot();
+    setActiveReceiptId(saved.id);
+    setReceiptStatus(saved.status);
+    setPersistedImageHash(saved.imageHash);
+    setReceiptCreatedAt(saved.createdAt);
+    setShareTextSnapshot(saved.shareText);
+    setState(saved.state);
+    setEqualSplit(saved.equalSplit);
+    setAnalysis(null);
+    setBanner({ kind: "ok", text: "Kayıtlı fiş yüklendi — kalemleri kontrol edebilirsin." });
+    setExpandedItemId(null);
+    setChargesOpen(false);
+    setHeuristicItemsSet(new Set());
+    setUserEditedItems(new Set());
+    setLlmAppliedItemIds(new Set());
+    setHeuristicApplied(false);
+    setAssignmentsBeforeSuggest(null);
+    setScanPhase("idle");
+    setStep(1);
+    setHistoryOpen(false);
+  }
+
+  async function analyzeImage(image: PickedImage, imageHash: string) {
     try {
-      const picked = await picker();
-      if (!picked) {
-        setScanPhase("idle");
-        return;
-      }
-      setStep(1);
-      setScanPhase("preparing");
-      const image = await optimizePickedImage(picked);
+      setPersistedImageHash(imageHash);
+      setReceiptStatus("draft");
       setScanPhase("analyzing");
 
-      // Akışlı yol: kalemler geldikçe listeyi canlı doldur (algılanan hız). Akış
-      // başarısız olursa (eski sunucu / ağ) tek-seferlik analize sessizce düş.
       let result: AnalyzedReceipt;
       try {
         const streamed: StreamItem[] = [];
@@ -290,6 +345,58 @@ export function App() {
           ? `${count} kalem bulundu (önbellek).`
           : `${count} kalem okundu. Lütfen kontrol et.`,
       });
+      void flushHistory();
+    } catch (err) {
+      setBanner({
+        kind: "error",
+        text: err instanceof Error ? err.message : "Bir şeyler ters gitti.",
+      });
+    } finally {
+      setScanPhase("idle");
+    }
+  }
+
+  async function runScan(picker: () => Promise<PickedUri | null>) {
+    setBanner(null);
+    setScanPhase("picking");
+    prewarmBackend();
+    try {
+      const picked = await picker();
+      if (!picked) {
+        setScanPhase("idle");
+        return;
+      }
+      setStep(1);
+      setScanPhase("preparing");
+      const image = await optimizePickedImage(picked);
+      const imageHash = await hashImageBase64(image.base64);
+
+      const store = await getHistoryStore();
+      const existing = await store.findByImageHash(imageHash);
+      if (existing) {
+        setScanPhase("idle");
+        Alert.alert(
+          "Fiş zaten kayıtlı",
+          `"${existing.title}" geçmişte var. Açmak ister misin?`,
+          [
+            {
+              text: "Yine de tara",
+              onPress: () => {
+                void analyzeImage(image, imageHash);
+              },
+            },
+            {
+              text: "Aç",
+              onPress: () => {
+                void loadReceiptFromHistory(existing);
+              },
+            },
+          ],
+        );
+        return;
+      }
+
+      await analyzeImage(image, imageHash);
     } catch (err) {
       setBanner({ kind: "error", text: err instanceof Error ? err.message : "Bir şeyler ters gitti." });
     } finally {
@@ -303,9 +410,9 @@ export function App() {
     setStep(1);
   }
 
-  function resetAll() {
+  /** Tarama oturumunu sıfırla; kişiler korunur (yanlış fiş / yeniden tara). */
+  function resetScanSession() {
     invalidateSuggestPrefetch();
-    setState(initialState());
     setAnalysis(null);
     setBanner(null);
     setExpandedItemId(null);
@@ -316,8 +423,63 @@ export function App() {
     setLlmAppliedItemIds(new Set());
     setHeuristicApplied(false);
     setAssignmentsBeforeSuggest(null);
-    setScanPhase("idle");
-    setStep(0);
+    setActiveReceiptId(null);
+    setReceiptStatus("draft");
+    setPersistedImageHash(undefined);
+    setShareTextSnapshot(undefined);
+    setReceiptCreatedAt(undefined);
+    resetHistorySnapshot();
+    setState((prev) => ({
+      ...prev,
+      items: [],
+      assignments: {},
+      discountCents: 0,
+      tax: { included: true, value: "" },
+      tip: { mode: "proportional", isPercent: true, value: "" },
+    }));
+  }
+
+  function beginRescan(picker: () => Promise<PickedUri | null>) {
+    resetScanSession();
+    void runScan(picker);
+  }
+
+  function promptRescan() {
+    Alert.alert(
+      "Fişi yeniden tara",
+      "Mevcut kalemler ve atamalar silinir; kişi listesi korunur.",
+      [
+        { text: "Vazgeç", style: "cancel" },
+        { text: "Kamera", onPress: () => beginRescan(captureFromCamera) },
+        { text: "Galeri", onPress: () => beginRescan(pickFromLibrary) },
+      ],
+    );
+  }
+
+  function resetAll() {
+    void (async () => {
+      await flushHistory();
+      invalidateSuggestPrefetch();
+      resetHistorySnapshot();
+      setActiveReceiptId(null);
+      setReceiptStatus("draft");
+      setPersistedImageHash(undefined);
+      setShareTextSnapshot(undefined);
+      setReceiptCreatedAt(undefined);
+      setState(initialState());
+      setAnalysis(null);
+      setBanner(null);
+      setExpandedItemId(null);
+      setChargesOpen(false);
+      setEqualSplit(false);
+      setHeuristicItemsSet(new Set());
+      setUserEditedItems(new Set());
+      setLlmAppliedItemIds(new Set());
+      setHeuristicApplied(false);
+      setAssignmentsBeforeSuggest(null);
+      setScanPhase("idle");
+      setStep(0);
+    })();
   }
 
   function updateItem(id: string, patch: Partial<{ name: string; price: string }>) {
@@ -427,7 +589,11 @@ export function App() {
         return `${name}: ${state.currency}${formatCents(p.totalCents)}`;
       }),
     ];
-    await Share.share({ message: lines.join("\n") });
+    const message = lines.join("\n");
+    await Share.share({ message });
+    setShareTextSnapshot(message);
+    setReceiptStatus("shared");
+    await flushHistory();
   }
 
   // --- Adım ilerleme ------------------------------------------------------
@@ -440,7 +606,9 @@ export function App() {
     true);
 
   function advanceFromStep3() {
+    setReceiptStatus("confirmed");
     setStep(4);
+    void flushHistory();
   }
 
   function nextStep() {
@@ -481,7 +649,9 @@ export function App() {
   /** Kısayol: atamayı atla, hesabı kişi sayısına eşit böl ve özete geç. */
   function goEqualSplit() {
     setEqualSplit(true);
+    setReceiptStatus("confirmed");
     setStep(4);
+    void flushHistory();
   }
 
   function goBack() {
@@ -491,6 +661,8 @@ export function App() {
       return;
     }
     if (step === 3) invalidateSuggestPrefetch();
+    // Taramadan gelinen kalemler — geri = fişi iptal, anasayfada hayalet taslak kalmasın.
+    if (step === 1 && analysis) resetScanSession();
     setStep((s) => Math.max(0, s - 1) as Step);
   }
 
@@ -500,7 +672,9 @@ export function App() {
     step === 4 ? "Paylaş" :
     "Devam";
 
-  const showFooterButton = step > 0 || state.items.length > 0;
+  const showFooterButton = step > 0;
+  const showRescanBar = step === 1 && !scanBusy;
+  const showRescanLink = (step === 2 || step === 3) && !scanBusy;
   const showMiniBar = computed !== null && step >= 2;
 
   // --- Render -------------------------------------------------------------
@@ -592,6 +766,17 @@ export function App() {
                 </View>
               )}
 
+              {scanPhase === "idle" && (
+                <HistoryHomeTeaser
+                  colors={colors}
+                  refreshToken={historyRefreshToken}
+                  onOpenAll={() => setHistoryOpen(true)}
+                  onSelect={(summary) => {
+                    void loadReceiptFromHistory(summary);
+                  }}
+                />
+              )}
+
               {banner && (
                 <View
                   style={[styles.banner, banner.kind === "ok" ? styles.bannerOk : styles.bannerError]}
@@ -617,6 +802,29 @@ export function App() {
                   <Text style={styles.bannerText}>
                     Kontrol et: {analysis.needsConfirmation.join(", ")}
                   </Text>
+                </View>
+              )}
+
+              {showRescanBar && (
+                <View style={styles.rescanBar}>
+                  <View style={styles.rescanCopy}>
+                    <Text style={styles.rescanTitle}>Yanlış fiş mi?</Text>
+                    <Text style={styles.rescanSub}>Başka fotoğrafla tekrar okutabilirsin</Text>
+                  </View>
+                  <View style={styles.rescanActions}>
+                    <Pressable
+                      style={styles.rescanBtn}
+                      onPress={() => beginRescan(captureFromCamera)}
+                    >
+                      <Text style={styles.rescanBtnText}>Kamera</Text>
+                    </Pressable>
+                    <Pressable
+                      style={styles.rescanBtn}
+                      onPress={() => beginRescan(pickFromLibrary)}
+                    >
+                      <Text style={styles.rescanBtnText}>Galeri</Text>
+                    </Pressable>
+                  </View>
                 </View>
               )}
 
@@ -754,6 +962,11 @@ export function App() {
                   <Text style={styles.btnGhostText}>Ekle</Text>
                 </Pressable>
               </View>
+              {showRescanLink && (
+                <Pressable onPress={promptRescan} hitSlop={8} style={styles.rescanLinkWrap}>
+                  <Text style={styles.rescanLinkText}>Fişi yeniden tara</Text>
+                </Pressable>
+              )}
             </>
           )}
 
@@ -945,6 +1158,11 @@ export function App() {
                   );
                 })}
               </View>
+              {showRescanLink && (
+                <Pressable onPress={promptRescan} hitSlop={8} style={styles.rescanLinkWrap}>
+                  <Text style={styles.rescanLinkText}>Fişi yeniden tara</Text>
+                </Pressable>
+              )}
             </>
           )}
 
@@ -1169,6 +1387,21 @@ export function App() {
           )}
         </View>
       </KeyboardAvoidingView>
+
+      <HistoryModal
+        visible={historyOpen}
+        colors={colors}
+        onClose={() => {
+          setHistoryOpen(false);
+          setHistoryRefreshToken((t) => t + 1);
+        }}
+        onSelect={(summary) => {
+          void loadReceiptFromHistory(summary);
+        }}
+        onNewReceipt={() => {
+          resetAll();
+        }}
+      />
     </View>
   );
 }
@@ -1252,6 +1485,33 @@ function makeStyles(c: Palette) {
     bannerWarn: { backgroundColor: c.warnBg, borderWidth: 1, borderColor: c.warn },
     bannerText: { color: c.text, fontSize: 13, lineHeight: 18 },
     equalStrip: { gap: 6 },
+
+    rescanBar: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 12,
+      padding: 12,
+      borderRadius: radius.md,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
+    rescanCopy: { flex: 1, gap: 2 },
+    rescanTitle: { color: c.text, fontSize: 14, fontWeight: "700" },
+    rescanSub: { color: c.textDim, fontSize: 12, lineHeight: 16 },
+    rescanActions: { flexDirection: "row", gap: 8 },
+    rescanBtn: {
+      paddingVertical: 8,
+      paddingHorizontal: 12,
+      borderRadius: radius.sm,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+    },
+    rescanBtnText: { color: c.primary, fontWeight: "700", fontSize: 13 },
+    rescanLinkWrap: { alignItems: "center", paddingVertical: 8 },
+    rescanLinkText: { color: c.textDim, fontSize: 14, fontWeight: "600" },
 
     input: {
       backgroundColor: c.surfaceAlt,
