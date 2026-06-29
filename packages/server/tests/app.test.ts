@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { MockProvider, MockAssignmentProvider } from "@ahb/ai-orchestrator";
 import { createApp } from "../src/app.js";
 import { InMemoryQuota, InMemorySuggestQuota } from "../src/cache.js";
+import { MAX_IMAGE_BASE64_LEN, MAX_IMAGE_BYTES } from "../src/limits.js";
 
 const body = JSON.stringify({ imageBase64: "ZmFrZQ==", mimeType: "image/jpeg", locale: "tr-TR" });
 const headers = { "content-type": "application/json" };
@@ -24,6 +25,16 @@ describe("server /analyze (MockProvider)", () => {
     const res = await app.request("/health");
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, provider: "mock" });
+  });
+
+  it("privacy sayfası döner", async () => {
+    const app = createApp({ provider: new MockProvider() });
+    const res = await app.request("/privacy");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    const html = await res.text();
+    expect(html).toContain("SplitTab");
+    expect(html).toContain("Privacy Policy");
   });
 
   it("görüntüyü analiz eder", async () => {
@@ -89,6 +100,47 @@ describe("server /analyze (MockProvider)", () => {
       body: new Uint8Array([]),
     });
     expect(res.status).toBe(400);
+  });
+
+  it("aşırı büyük Content-Length /analyze için 413 döner", async () => {
+    const app = createApp({ provider: new MockProvider() });
+    const res = await app.request("/analyze", {
+      method: "POST",
+      headers: { ...headers, "content-length": String(MAX_IMAGE_BYTES + 1) },
+      body,
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it("aşırı büyük Content-Length /analyze/stream için 413 döner", async () => {
+    const app = createApp({ provider: new MockProvider() });
+    const res = await app.request("/analyze/stream", {
+      method: "POST",
+      headers: { ...headers, "content-length": String(MAX_IMAGE_BYTES + 1) },
+      body,
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it("aşırı büyük base64 gövdesini 413 ile reddeder", async () => {
+    const app = createApp({ provider: new MockProvider() });
+    const huge = "A".repeat(MAX_IMAGE_BASE64_LEN + 1);
+    const res = await app.request("/analyze", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ imageBase64: huge, mimeType: "image/jpeg" }),
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it("aşırı büyük binary gövdesini 413 ile reddeder", async () => {
+    const app = createApp({ provider: new MockProvider() });
+    const res = await app.request("/analyze/stream", {
+      method: "POST",
+      headers: { "content-type": "image/jpeg" },
+      body: new Uint8Array(MAX_IMAGE_BYTES + 1),
+    });
+    expect(res.status).toBe(413);
   });
 });
 

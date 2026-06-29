@@ -3,8 +3,10 @@
  * Varsayılan (gemini) yol artık KADEMELİ: hızlı flash birincil + şüphede pro'ya yükselt
  * + Gemini erişilemezse Document AI'a düş (DESIGN.md §7 model kademesi).
  * Anahtar yoksa MockProvider'a düşer → anahtarsız yerel geliştirme/test.
+ *
+ * NOT: node:fs ve google-auth-library yalnızca DocAI hata ayıklama / Node sunucu yolunda
+ * kullanılır; Workers'ta parse edilirken kırılmamaları için tembel (dinamik) import edilir.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
 import {
   DocumentAiProvider,
   EscalatingProvider,
@@ -15,8 +17,8 @@ import {
   type AssignmentProvider,
   type VisionProvider,
 } from "@ahb/ai-orchestrator";
-import { GoogleAuth } from "google-auth-library";
 import { geminiFetch } from "./gemini-fetch.js";
+import type { KVNamespace, DurableObjectNamespace } from "./cache.js";
 
 export interface Env {
   AHB_PROVIDER?: string;
@@ -34,6 +36,10 @@ export interface Env {
   DOCAI_DEBUG?: string;
   /** Günlük atama önerisi kotası (varsayılan 100). */
   SUGGEST_QUOTA_PER_DAY?: string;
+  /** Cloudflare KV binding — Workers production'da kalıcı kota + cache. */
+  AHB_KV?: KVNamespace;
+  /** Atomik günlük kota — KV yarışını önler; varsa KvQuota yerine kullanılır. */
+  QUOTA_DO?: DurableObjectNamespace;
 }
 
 const ESCALATION_OFF = new Set(["", "off", "none", "kapali", "kapalı"]);
@@ -118,20 +124,26 @@ function buildDocumentAi(env: Env): DocumentAiProvider | null {
     ...(env.DOCAI_DEBUG === "1"
       ? {
           onRawDocument: (doc: unknown) => {
-            const json = JSON.stringify(doc, null, 2);
-            // "Son" yanıt sabit dosyada (hızlı erişim) + zaman damgalı arşiv
-            // (debug/ klasörü, .gitignore'da) → birden çok fişi üst üste yazmadan sakla.
-            const latest = new URL("../docai-debug.json", import.meta.url).pathname;
-            writeFileSync(latest, json);
-            try {
-              const dir = new URL("../debug/", import.meta.url).pathname;
-              mkdirSync(dir, { recursive: true });
-              const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-              writeFileSync(`${dir}docai-${stamp}.json`, json);
-            } catch {
-              /* arşiv yazılamazsa sessiz geç — "son" dosya yine güncel */
-            }
-            console.log(`[docai-debug] ham yanıt yazıldı → ${latest} (+ debug/ arşivi)`);
+            // node:fs yalnızca Node ortamında; Workers'ta sessizce atlanır.
+            void (async () => {
+              try {
+                const { mkdirSync, writeFileSync } = await import("node:fs");
+                const json = JSON.stringify(doc, null, 2);
+                const latest = new URL("../docai-debug.json", import.meta.url).pathname;
+                writeFileSync(latest, json);
+                try {
+                  const dir = new URL("../debug/", import.meta.url).pathname;
+                  mkdirSync(dir, { recursive: true });
+                  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+                  writeFileSync(`${dir}docai-${stamp}.json`, json);
+                } catch {
+                  /* arşiv yazılamazsa sessiz geç */
+                }
+                console.log(`[docai-debug] ham yanıt yazıldı → ${latest}`);
+              } catch {
+                /* Workers ortamında node:fs yok — sessiz geç */
+              }
+            })();
           },
         }
       : {}),
@@ -140,16 +152,23 @@ function buildDocumentAi(env: Env): DocumentAiProvider | null {
 
 /**
  * Servis hesabıyla (GOOGLE_APPLICATION_CREDENTIALS) Google access token üreten kapanış.
- * Auth istemcisi tembel oluşturulup önbelleğe alınır → buildProvider senkron kalır.
- * Yalnızca Node tarafında çalışır (Cloudflare Workers'da farklı bir yol gerekir).
+ * google-auth-library tembel yüklenir → Workers parse sürecinde kırılmaz.
+ * Yalnızca Node + DocAI etkin yolda çalışır.
  */
 function makeGoogleAccessTokenFn(): () => Promise<string> {
-  let clientPromise: ReturnType<GoogleAuth["getClient"]> | undefined;
-  const auth = new GoogleAuth({
-    scopes: ["https://www.googleapis.com/auth/cloud-platform"],
-  });
+  let clientPromise: Promise<{ getAccessToken(): Promise<{ token: string | null }> }> | undefined;
   return async () => {
-    if (!clientPromise) clientPromise = auth.getClient();
+    if (!clientPromise) {
+      const { GoogleAuth } = await import("google-auth-library") as {
+        GoogleAuth: new (opts: { scopes: string[] }) => {
+          getClient(): Promise<{ getAccessToken(): Promise<{ token: string | null }> }>;
+        };
+      };
+      const auth = new GoogleAuth({
+        scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+      });
+      clientPromise = auth.getClient();
+    }
     const client = await clientPromise;
     const token = (await client.getAccessToken()).token;
     if (!token) throw new Error("Google access token alınamadı");

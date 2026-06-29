@@ -1,5 +1,6 @@
 # Cloudflare Workers deploy yapılandırması (DESIGN.md §6.2).
-# Anahtarı koda yazma; secret olarak ekle:  wrangler secret put GEMINI_API_KEY
+# API anahtarını koda yazma; secret olarak ekle:
+#   npx wrangler secret put GEMINI_API_KEY
 name = "ahb-server"
 main = "src/worker.ts"
 compatibility_date = "2026-06-01"
@@ -8,3 +9,24 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 AHB_PROVIDER = "gemini"
 GEMINI_MODEL = "gemini-2.5-flash"
+# Escalation modeli — daha yüksek maliyetli; şüpheli sonuçlarda devreye girer.
+AHB_ESCALATION_MODEL = "gemini-2.5-pro"
+# DocAI prod'da kapalı (Workers'ta GoogleAuth uyumsuz).
+AHB_FALLBACK = ""
+
+# KV namespace — kalıcı kota + önbellek.
+# Namespace oluşturma:
+#   npx wrangler kv namespace create AHB_KV
+# Çıktıdaki id'yi aşağıya yaz:
+[[kv_namespaces]]
+binding = "AHB_KV"
+id = "c674d4ebf7524b27877e6c0e750860e6"
+# preview_id = "REPLACE_WITH_YOUR_KV_PREVIEW_NAMESPACE_ID"
+
+[[durable_objects.bindings]]
+name = "QUOTA_DO"
+class_name = "QuotaCounter"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["QuotaCounter"]

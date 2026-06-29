@@ -26,6 +26,12 @@ import {
   type QuotaStore,
   type SuggestionCache,
 } from "./cache.js";
+import { homePageHtml, htmlResponse, privacyPageHtml } from "./static-pages.js";
+import {
+  binaryImageTooLarge,
+  imageTooLarge,
+  rejectOversizeContentLength,
+} from "./limits.js";
 
 export interface AppConfig {
   provider: VisionProvider;
@@ -60,6 +66,9 @@ async function parseImage(c: Context): Promise<ParsedImage | { error: string }> 
   if (contentType.startsWith("image/")) {
     const buf = await c.req.arrayBuffer();
     if (buf.byteLength === 0) return { error: "Boş görüntü gövdesi" };
+    if (binaryImageTooLarge(buf.byteLength)) {
+      return { error: "Görüntü çok büyük (max 8 MB)" };
+    }
     const imageBase64 = bytesToBase64(new Uint8Array(buf));
     const locale = c.req.header("x-locale") ?? c.req.query("locale");
     return { imageBase64, mimeType: contentType, ...(locale ? { locale } : {}) };
@@ -73,6 +82,9 @@ async function parseImage(c: Context): Promise<ParsedImage | { error: string }> 
   }
   if (!body.imageBase64 || !body.mimeType) {
     return { error: "imageBase64 ve mimeType zorunlu" };
+  }
+  if (imageTooLarge(body.imageBase64)) {
+    return { error: "Görüntü çok büyük (max 8 MB)" };
   }
   return {
     imageBase64: body.imageBase64,
@@ -90,6 +102,10 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+function parseImageErrorStatus(message: string): 400 | 413 {
+  return message.includes("çok büyük") ? 413 : 400;
+}
+
 export function createApp(config: AppConfig): Hono {
   const cache = config.cache ?? new InMemoryCache();
   const suggestionCache = config.suggestionCache ?? new InMemorySuggestionCache();
@@ -98,14 +114,36 @@ export function createApp(config: AppConfig): Hono {
   const assignmentProvider = config.assignmentProvider;
   const app = new Hono();
 
-  app.use("/*", cors());
+  // CORS: native mobil istemciler Origin göndermez; tarayıcı erişimini kısıtlamak için
+  // boş / null origin'e açık, diğer origin'lere kapalı.
+  app.use(
+    "/*",
+    cors({
+      origin: (origin) => (!origin ? "*" : null),
+      allowHeaders: ["Content-Type", "x-device-id", "x-locale"],
+      allowMethods: ["GET", "POST", "OPTIONS"],
+    }),
+  );
+
+  // Payload boyut limiti — Content-Length erken reddi + parseImage içinde gerçek boyut kontrolü.
+  const analyzeBodyLimit = async (c: Context, next: () => Promise<void>) => {
+    if (rejectOversizeContentLength(c.req.header("content-length"))) {
+      return c.json({ error: "Görüntü çok büyük (max 8 MB)" }, 413);
+    }
+    await next();
+  };
+  app.use("/analyze", analyzeBodyLimit);
+  app.use("/analyze/stream", analyzeBodyLimit);
+
+  app.get("/", (c) => htmlResponse(homePageHtml()));
+  app.get("/privacy", (c) => htmlResponse(privacyPageHtml()));
 
   app.get("/health", (c) => c.json({ ok: true, provider: config.provider.name }));
 
   app.post("/analyze", async (c) => {
     const parsed = await parseImage(c);
     if ("error" in parsed) {
-      return c.json({ error: parsed.error }, 400);
+      return c.json({ error: parsed.error }, parseImageErrorStatus(parsed.error));
     }
 
     const deviceId = c.req.header("x-device-id") ?? "anon";
@@ -168,7 +206,7 @@ export function createApp(config: AppConfig): Hono {
   // gecikmeyi düşürmek için kalemleri anında gösterebilir (DESIGN.md §7).
   app.post("/analyze/stream", async (c) => {
     const parsed = await parseImage(c);
-    if ("error" in parsed) return c.json({ error: parsed.error }, 400);
+    if ("error" in parsed) return c.json({ error: parsed.error }, parseImageErrorStatus(parsed.error));
 
     const deviceId = c.req.header("x-device-id") ?? "anon";
     const q = await quota.consume(deviceId);
