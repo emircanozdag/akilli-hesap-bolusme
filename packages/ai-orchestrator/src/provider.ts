@@ -60,6 +60,10 @@ export const SYSTEM_INSTRUCTION = [
   "  satırları KALEM DEĞİLDİR → lineItems'a koyma.",
   "- İndirim/kampanya ('Kampanya İndirim', 'SATIR IND', 'İSKONTO') satırlarını lineItems'a KOYMA;",
   "  toplam indirimi charges.discountCents'e yaz (pozitif kuruş, yalnızca BİR KEZ).",
+  "- Servis/kuver ('Servis %10', 'Servis Bedeli', 'Kuver', 'Garsoniye', 'Service Charge', 'Gratuity') satırlarını lineItems'a KOYMA;",
+  "  tutarı charges.serviceChargeCents'e yaz (pozitif kuruş).",
+  "- BAHŞİŞ (charges.tipCents): yalnızca fişte AÇIKÇA 'TIP'/'BAHŞİŞ' yazan basılı bir satır varsa doldur.",
+  "  Fişe basılı her servis/garsoniye/gratuity tutarı serviceChargeCents'tir; tipCents'e YAZMA (varsayılan 0).",
   "  SATIR IND kalem indirimlerinin özeti ise discountCents'e SATIR IND tutarını yaz, kalemleri tekrarlama.",
   "  Ürün kalemleri BRÜT (indirim öncesi) fiyatıyla kalsın.",
 ].join("\n");

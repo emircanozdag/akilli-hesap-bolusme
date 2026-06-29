@@ -266,4 +266,93 @@ describe("analyzeRaw — aritmetik & confidence flag'leri (§7)", () => {
     expect(r.arithmetic.balanced).toBe(true);
     expect(r.receipt.lineItems).toHaveLength(products.length);
   });
+
+  it("KDV dahil fiş: kalemler toplamı=toplam ise taxIncludedInItems düzeltir", () => {
+    const r = analyzeRaw(
+      {
+        meta: { currency: "TRY", locale: "tr-TR", currencyConfidence: 0.95 },
+        lineItems: [
+          { name: "Atom", totalPriceCents: 26000, confidence: 0.9 },
+          { name: "Rakı", totalPriceCents: 250000, confidence: 0.9 },
+        ],
+        charges: {
+          subtotalCents: 235000,
+          taxCents: 42300,
+          totalCents: 276000,
+          taxIncludedInItems: false,
+        },
+      },
+      input,
+    );
+    expect(r.receipt.charges.taxIncludedInItems).toBe(true);
+    expect(r.arithmetic.balanced).toBe(true);
+    expect(r.needsConfirmation).not.toContain("total");
+  });
+
+  it("servis/kuver satırını kalemden ayırır ve toplama ekler", () => {
+    const r = analyzeRaw(
+      {
+        meta: { currency: "TRY", locale: "tr-TR", currencyConfidence: 0.95 },
+        lineItems: [
+          { name: "Atom", totalPriceCents: 26000, confidence: 0.9 },
+          { name: "Servis %10", totalPriceCents: 2600, confidence: 0.9 },
+        ],
+        charges: {
+          subtotalCents: 28600,
+          totalCents: 28600,
+          serviceChargeCents: 0,
+          taxIncludedInItems: true,
+        },
+      },
+      input,
+    );
+    expect(r.receipt.lineItems).toHaveLength(1);
+    expect(r.receipt.charges.serviceChargeCents).toBe(2600);
+    expect(r.arithmetic.balanced).toBe(true);
+  });
+
+  it("fişte basılı bahşiş (tip) servis bedeline taşınır — ABD auto-gratuity (Nusret deseni)", () => {
+    // Model service charge'ı yanlışlıkla tipCents'e yazmış. OCR'dan gelen tutar fişte
+    // BASILIDIR → service charge'dır (gerçek tip elle eklenir, basılı gelmez).
+    const r = analyzeRaw(
+      {
+        meta: { currency: "USD", locale: "en-US", currencyConfidence: 0.95 },
+        lineItems: [
+          { name: "Nusret Sushi", qty: 2, totalPriceCents: 9200, confidence: 0.9 },
+          { name: "Baklava", qty: 1, totalPriceCents: 6627, confidence: 0.9 },
+        ],
+        charges: {
+          subtotalCents: 15827,
+          serviceChargeCents: 0,
+          tipCents: 2374,
+          totalCents: 18201,
+          taxIncludedInItems: true,
+        },
+      },
+      input,
+    );
+    expect(r.receipt.charges.serviceChargeCents).toBe(2374);
+    expect(r.receipt.charges.tipCents).toBe(0);
+    expect(r.arithmetic.balanced).toBe(true);
+  });
+
+  it("servis zaten doğru alanda + ayrı bahşiş varsa ikisine de dokunulmaz", () => {
+    const r = analyzeRaw(
+      {
+        meta: { currency: "USD", locale: "en-US", currencyConfidence: 0.95 },
+        lineItems: [{ name: "Steak", totalPriceCents: 10000, confidence: 0.9 }],
+        charges: {
+          subtotalCents: 10000,
+          serviceChargeCents: 1500,
+          tipCents: 1000,
+          totalCents: 12500,
+          taxIncludedInItems: true,
+        },
+      },
+      input,
+    );
+    expect(r.receipt.charges.serviceChargeCents).toBe(1500);
+    expect(r.receipt.charges.tipCents).toBe(1000);
+    expect(r.arithmetic.balanced).toBe(true);
+  });
 });

@@ -18,6 +18,7 @@ function sampleState(): SplitState {
     ],
     assignments: { i1: { p1: 1 } },
     discountCents: 0,
+    serviceChargeCents: 0,
     tax: { included: true, value: "" },
     tip: { mode: "proportional", isPercent: true, value: "" },
   };

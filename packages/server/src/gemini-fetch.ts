@@ -1,28 +1,57 @@
 /**
- * Node fetch sarmalayıcısı — global fetch'in 10 sn bağlantı zaman aşımını uzatır.
- * Gemini'ye ilk TLS bağlantısı yavaş ağda 10 sn'yi aşabiliyordu (UND_ERR_CONNECT_TIMEOUT).
+ * Gemini fetch sarmalayıcısı — ortama göre otomatik seçim.
+ *
+ * Node.js: undici tembel yüklenir; uzatılmış bağlantı (30 sn) + gövde (90 sn) zaman aşımı.
+ * Cloudflare Workers: globalThis.fetch kullanılır.
+ *
+ * ÖNEMLİ: Ortam tespiti her istekte yapılır — Wrangler bundle'ı Node'da oluşturulduğu için
+ * modül-seviyesi `const IS_NODE = ...` derleme zamanında yanlışlıkla true olabilir.
  */
-import { createRequire } from "node:module";
 
-const require = createRequire(import.meta.url);
-const { Agent, fetch: undiciFetch } = require("undici") as {
+type RawFetch = (url: string, init?: Record<string, unknown>) => Promise<Response>;
+
+interface UndiciModule {
   Agent: new (opts: {
     connect?: { timeout?: number };
     bodyTimeout?: number;
     headersTimeout?: number;
   }) => unknown;
-  fetch: (url: string, init?: Record<string, unknown>) => Promise<Response>;
-};
+  fetch: RawFetch;
+}
 
-const CONNECT_TIMEOUT_MS = 30_000;
-const BODY_TIMEOUT_MS = 90_000;
+let undiciCache: { fetchFn: RawFetch; agent: unknown } | null = null;
 
-const agent = new Agent({
-  connect: { timeout: CONNECT_TIMEOUT_MS },
-  bodyTimeout: BODY_TIMEOUT_MS,
-  headersTimeout: BODY_TIMEOUT_MS,
-});
+async function resolveUndici(): Promise<{ fetchFn: RawFetch; agent: unknown }> {
+  if (undiciCache) return undiciCache;
+  const { createRequire } = await import("node:module");
+  const req = createRequire(import.meta.url);
+  const undici = req("undici") as UndiciModule;
+  const agent = new undici.Agent({
+    connect: { timeout: 30_000 },
+    bodyTimeout: 90_000,
+    headersTimeout: 90_000,
+  });
+  undiciCache = { fetchFn: undici.fetch, agent };
+  return undiciCache;
+}
 
-/** GeminiProvider'a enjekte edilecek fetch (yalnızca Node sunucu). */
-export const geminiFetch: typeof fetch = ((url, init) =>
-  undiciFetch(url as string, { ...init, dispatcher: agent })) as typeof fetch;
+function isWorkersRuntime(): boolean {
+  return (
+    typeof navigator !== "undefined" && navigator.userAgent === "Cloudflare-Workers"
+  );
+}
+
+/**
+ * GeminiProvider'a enjekte edilecek fetch.
+ * Her çağrıda runtime ortamı kontrol edilir.
+ */
+export const geminiFetch: typeof fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+  if (isWorkersRuntime()) {
+    return globalThis.fetch(url, init);
+  }
+  const { fetchFn, agent } = await resolveUndici();
+  return fetchFn(url as string, {
+    ...(init as Record<string, unknown>),
+    dispatcher: agent,
+  });
+}) as typeof fetch;

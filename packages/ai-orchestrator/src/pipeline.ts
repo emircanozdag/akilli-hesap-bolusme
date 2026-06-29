@@ -92,7 +92,7 @@ export function analyzeRaw(
     discrepancyCents,
   };
 
-  if (itemsSumCents !== c.subtotalCents) {
+  if (itemsSumCents !== c.subtotalCents && c.subtotalCents > 0) {
     warnings.push(
       `Kalemler toplamı (${itemsSumCents}) ara toplamdan (${c.subtotalCents}) farklı.`,
     );

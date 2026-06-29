@@ -5,6 +5,7 @@ import type { SuggestInput, SuggestResult } from "@ahb/ai-orchestrator";
 import type { SplitState } from "./logic";
 import { fetchWithTimeout } from "./fetch-timeout";
 import { deviceId, resolveApiBase } from "./api-base";
+import { formatHttpError, formatNetworkError, type ApiErrorBody } from "./api-errors";
 
 const SUGGEST_TIMEOUT_MS = 15_000;
 
@@ -51,10 +52,24 @@ export async function suggestAssignmentsViaServer(
     );
 
     if (!res.ok) {
-      const detail = (await res.json().catch(() => ({}))) as { error?: string };
-      throw new Error(detail.error ?? `Sunucu hatası (${res.status})`);
+      const detail = (await res.json().catch(() => ({}))) as ApiErrorBody;
+      throw new Error(formatHttpError(res.status, detail, "suggest"));
     }
     return (await res.json()) as SuggestResult & { cached?: boolean };
+  } catch (err) {
+    if (err instanceof Error) {
+      if (signal?.aborted) throw err;
+      const msg = err.message;
+      if (
+        err.name === "AbortError" ||
+        msg === "Network request failed" ||
+        msg.includes("Failed to fetch")
+      ) {
+        throw new Error(formatNetworkError(err, "suggest"));
+      }
+      throw err;
+    }
+    throw new Error(formatNetworkError(err, "suggest"));
   } finally {
     if (signal) signal.removeEventListener("abort", onAbort);
   }

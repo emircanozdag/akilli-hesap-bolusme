@@ -1,28 +1,40 @@
 {
   "expo": {
-    "name": "Akıllı Hesap Bölüşme",
+    "name": "SplitTab",
     "slug": "akilli-hesap-bolusme",
-    "version": "0.1.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "scheme": "ahb",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+    "icon": "./assets/app-icon.png",
     "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "cover",
       "backgroundColor": "#0b0e1a"
     },
     "ios": {
+      "bundleIdentifier": "com.ahb.akillihesapbolusme",
+      "buildNumber": "1",
       "supportsTablet": true,
       "infoPlist": {
-        "NSLocalNetworkUsageDescription": "Fiş okumak için bilgisayarındaki geliştirme sunucusuna bağlanır.",
-        "NSAppTransportSecurity": {
-          "NSAllowsLocalNetworking": true
-        }
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSCameraUsageDescription": "Fişi taramak için kameraya erişim gerekiyor.",
+        "NSPhotoLibraryUsageDescription": "Fişin fotoğrafını seçmek için galeriye erişim gerekiyor."
       }
     },
     "android": {
       "edgeToEdgeEnabled": true
     },
     "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash.png",
+          "resizeMode": "cover",
+          "backgroundColor": "#0b0e1a"
+        }
+      ],
       [
         "expo-image-picker",
         {

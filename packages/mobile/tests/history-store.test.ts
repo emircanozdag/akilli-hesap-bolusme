@@ -11,6 +11,7 @@ function stateWithName(name: string): SplitState {
     people: [{ id: "p1", name: "Ben", color: "#6366f1" }],
     assignments: {},
     discountCents: 0,
+    serviceChargeCents: 0,
     tax: { included: true, value: "" },
     tip: { mode: "proportional", isPercent: true, value: "" },
   };

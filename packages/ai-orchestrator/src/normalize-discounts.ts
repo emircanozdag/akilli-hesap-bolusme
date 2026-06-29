@@ -17,6 +17,24 @@ const DISCOUNT_LINE_NAME =
 const SUMMARY_LINE_NAME =
   /^(ara\s*toplam|toplam|kdv|tutar|yiyecek|icecek|ice\s*cek|nakit|kredi|odeme|tahsil|genel\s*toplam)$/i;
 
+/** Servis/kuver satırı — ürün değil, charges.serviceChargeCents'e gider. */
+const SERVICE_LINE_NAME =
+  /^(servis(\s*(bedeli|%?\s*\d+))?|garsoniye|kuver|cover\s*charge|service(\s*charge)?|\d+\s*x\s*kuver)/i;
+
+function isServiceLine(it: RawLineItem): boolean {
+  if (it.totalPriceCents <= 0) return false;
+  return SERVICE_LINE_NAME.test(normalizeName(it.name));
+}
+
+function isDiscountOrSummaryLine(it: RawLineItem): boolean {
+  const norm = normalizeName(it.name);
+  if (isServiceLine(it)) return false;
+  if (it.totalPriceCents < 0) return true;
+  if (DISCOUNT_LINE_NAME.test(norm)) return true;
+  if (SUMMARY_LINE_NAME.test(norm)) return true;
+  return false;
+}
+
 function normalizeName(s: string): string {
   return s
     .normalize("NFD")
@@ -24,14 +42,6 @@ function normalizeName(s: string): string {
     .toLowerCase()
     .replace(/ı/g, "i")
     .trim();
-}
-
-function isDiscountOrSummaryLine(it: RawLineItem): boolean {
-  const norm = normalizeName(it.name);
-  if (it.totalPriceCents < 0) return true;
-  if (DISCOUNT_LINE_NAME.test(norm)) return true;
-  if (SUMMARY_LINE_NAME.test(norm)) return true;
-  return false;
 }
 
 /** Brüt kalem toplamından fiş toplamına göre zorunlu indirim tutarını çıkarır. */
@@ -78,12 +88,85 @@ function resolveDiscountCents(
   return Math.min(Math.max(c.discountCents, discountFromLines), productSum);
 }
 
+const TAX_TOLERANCE_CENTS = 1;
+
+function nearCents(a: number, b: number): boolean {
+  return Math.abs(a - b) <= TAX_TOLERANCE_CENTS;
+}
+
+/** Fiş toplamı formülü (pipeline ile aynı). */
+function totalFromCharges(c: RawCharges, productSum: number): number {
+  return (
+    productSum +
+    (c.taxIncludedInItems ? 0 : c.taxCents) +
+    c.serviceChargeCents +
+    c.tipCents -
+    c.discountCents
+  );
+}
+
+/**
+ * KDV dahil/ayrı tutarsızlığını giderir.
+ * Sık OCR hatası: kalemler KDV dahil fiyatlarla doğru okunur ama charges.tax ayrı yazılır
+ * ve taxIncludedInItems=false kalır → sahte "toplam tutmuyor" uyarısı.
+ */
+function reconcileTaxInCharges(charges: RawCharges, productSum: number): RawCharges {
+  const base = { ...charges, subtotalCents: productSum };
+
+  if (nearCents(productSum, base.totalCents)) {
+    return { ...base, taxIncludedInItems: true };
+  }
+
+  if (base.serviceChargeCents > 0 && nearCents(productSum + base.serviceChargeCents, base.totalCents)) {
+    return { ...base, taxIncludedInItems: true };
+  }
+
+  if (
+    base.taxCents > 0 &&
+    nearCents(
+      productSum + base.taxCents + base.serviceChargeCents + base.tipCents - base.discountCents,
+      base.totalCents,
+    )
+  ) {
+    return { ...base, taxIncludedInItems: false };
+  }
+
+  if (nearCents(totalFromCharges(base, productSum), base.totalCents)) {
+    return base;
+  }
+
+  return base;
+}
+
+/**
+ * Fişte BASILI bahşiş tutarını servis bedeline taşır.
+ *
+ * Gerekçe kaynağa dayanır, ülkeye değil: OCR yalnızca fişte BASILI tutarları okur.
+ * Gerçek bahşiş (tip) müşteri tarafından sonradan elle eklenir ve fişe basılı GELMEZ.
+ * Dolayısıyla modelin charges.tipCents'e koyduğu tutar pratikte fişte basılı bir
+ * servis/garsoniye/auto-gratuity bedelidir (ör. ABD'de "Service Charge %18", TR'de
+ * "Servis"). Model bunu yanlış alana ("tip") yazınca UI'da "Bahşiş" olarak görünür.
+ *
+ * Yalnız servis bedeli HENÜZ bilinmiyorken (serviceChargeCents == 0) taşırız; model
+ * ikisini de doğru ayırmışsa dokunmayız. Toplam değişmez (tip de servis de toplama
+ * aynı şekilde eklenir) → aritmetik mutabakat bozulmaz.
+ */
+function reconcileTipAsService(charges: RawCharges): RawCharges {
+  if (charges.serviceChargeCents > 0 || charges.tipCents <= 0) return charges;
+  return { ...charges, serviceChargeCents: charges.tipCents, tipCents: 0 };
+}
+
 /** Ham OCR sonucunu bölüşüme uygun forma getirir (indirim satırları → charges.discountCents). */
 export function normalizeDiscountLines(data: RawOcrResult): RawOcrResult {
   const products: RawLineItem[] = [];
   let discountFromLines = 0;
+  let serviceFromLines = 0;
 
   for (const it of data.lineItems) {
+    if (isServiceLine(it)) {
+      serviceFromLines += it.totalPriceCents;
+      continue;
+    }
     if (isDiscountOrSummaryLine(it)) {
       discountFromLines += Math.abs(it.totalPriceCents);
       continue;
@@ -95,14 +178,21 @@ export function normalizeDiscountLines(data: RawOcrResult): RawOcrResult {
 
   const productSum = products.reduce((acc, it) => acc + it.totalPriceCents, 0);
   const discountCents = resolveDiscountCents(productSum, data.charges, discountFromLines);
+  const serviceChargeCents = Math.max(data.charges.serviceChargeCents, serviceFromLines);
+
+  const taxReconciled = reconcileTaxInCharges(
+    {
+      ...data.charges,
+      subtotalCents: productSum,
+      discountCents,
+      serviceChargeCents,
+    },
+    productSum,
+  );
 
   return {
     ...data,
     lineItems: products,
-    charges: {
-      ...data.charges,
-      subtotalCents: productSum,
-      discountCents,
-    },
+    charges: reconcileTipAsService(taxReconciled),
   };
 }

@@ -7,7 +7,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  InteractionManager,
   KeyboardAvoidingView,
+  Linking,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -24,24 +27,26 @@ import { clampWeightsToQty, heuristicSuggest } from "@ahb/ai-orchestrator";
 import {
   analyzeViaServer,
   analyzeViaServerStream,
+  backendOfflineMessage,
   captureFromCamera,
   checkBackendHealth,
   optimizePickedImage,
   pickFromLibrary,
   prewarmBackend,
-  resolveApiBase,
-  SCAN_PHASE_MESSAGES,
   type PickedUri,
   type PickedImage,
   type ScanPhase,
+  type ScanResult,
   type StreamItem,
 } from "./src/api";
+import { resolveApiBase } from "./src/api-base";
 import { personColor, radius, useTheme, type Palette } from "./src/theme";
 import {
   analyzedToState,
   computeFromState,
   formatCents,
   isValidAmount,
+  safeToCents,
   type SplitState,
 } from "./src/logic";
 import {
@@ -64,6 +69,13 @@ import {
 } from "./src/history/index";
 import type { HistoryStore } from "./src/history/store";
 import { useReceiptAutosave } from "./src/useReceiptAutosave";
+import {
+  buildReceiptValidationLines,
+  itemsAlignWithReceiptTotal,
+} from "./src/receipt-validation-ui";
+import { ScanProgressBar } from "./src/ScanProgressBar";
+import { buildShareText } from "./src/share-summary";
+import { acceptPrivacyConsent, hasPrivacyConsent } from "./src/settings";
 
 const LOCALE = "tr-TR";
 
@@ -92,6 +104,7 @@ function initialState(): SplitState {
     ],
     assignments: {},
     discountCents: 0,
+    serviceChargeCents: 0,
     tax: { included: true, value: "" },
     tip: { mode: "proportional", isPercent: true, value: "" },
   };
@@ -124,6 +137,7 @@ export function App() {
   const [llmAppliedItemIds, setLlmAppliedItemIds] = useState<Set<string>>(() => new Set());
   const [heuristicApplied, setHeuristicApplied] = useState(false);
   const prefetchAbortRef = useRef<AbortController | null>(null);
+  const analyzingStartedAtRef = useRef<number | undefined>(undefined);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyRefreshToken, setHistoryRefreshToken] = useState(0);
   const [activeReceiptId, setActiveReceiptId] = useState<string | null>(null);
@@ -132,6 +146,10 @@ export function App() {
   const [shareTextSnapshot, setShareTextSnapshot] = useState<string | undefined>();
   const [receiptCreatedAt, setReceiptCreatedAt] = useState<string | undefined>();
   const [historyStore, setHistoryStore] = useState<HistoryStore | null>(null);
+  const [consentModalVisible, setConsentModalVisible] = useState(false);
+  const [pendingPicker, setPendingPicker] = useState<(() => Promise<PickedUri | null>) | null>(
+    null,
+  );
 
   const computed = useMemo(
     () => computeFromState(equalSplit ? { ...state, assignments: {} } : state),
@@ -167,8 +185,34 @@ export function App() {
     [step, equalSplit, state],
   );
 
+  const step1Preview = useMemo(
+    () => (step === 1 && state.items.length > 0 ? computeFromState(state) : null),
+    [step, state],
+  );
+
+  // Kullanıcının GÜNCEL kalem toplamı (elle düzeltmeler dahil) — uyarılar bunu kullanır
+  // ki bir tutarı düzeltince fiş doğrulaması anında güncellensin.
+  const currentItemsSumCents = useMemo(
+    () => state.items.reduce((acc, it) => acc + safeToCents(it.price), 0),
+    [state.items],
+  );
+
+  const receiptValidation = useMemo(
+    () =>
+      analysis
+        ? buildReceiptValidationLines(analysis, state.currency, currentItemsSumCents)
+        : { info: [], warnings: [] },
+    [analysis, state.currency, currentItemsSumCents],
+  );
+
   const scanBusy = scanPhase !== "idle";
-  const scanMessage = scanPhase !== "idle" ? SCAN_PHASE_MESSAGES[scanPhase] : "";
+  const scanStreamCount = scanBusy ? state.items.length : 0;
+
+  function beginScanPhase(phase: ScanPhase) {
+    if (phase === "analyzing") analyzingStartedAtRef.current = Date.now();
+    else if (phase === "idle") analyzingStartedAtRef.current = undefined;
+    setScanPhase(phase);
+  }
 
   useEffect(() => {
     prewarmBackend();
@@ -303,7 +347,7 @@ export function App() {
     setLlmAppliedItemIds(new Set());
     setHeuristicApplied(false);
     setAssignmentsBeforeSuggest(null);
-    setScanPhase("idle");
+    beginScanPhase("idle");
     setStep(1);
     setHistoryOpen(false);
   }
@@ -312,9 +356,10 @@ export function App() {
     try {
       setPersistedImageHash(imageHash);
       setReceiptStatus("draft");
-      setScanPhase("analyzing");
+      beginScanPhase("uploading");
+      beginScanPhase("analyzing");
 
-      let result: AnalyzedReceipt;
+      let result: ScanResult;
       try {
         const streamed: StreamItem[] = [];
         result = await analyzeViaServerStream(image, LOCALE, (item) => {
@@ -339,11 +384,13 @@ export function App() {
       setAnalysis(result);
       setState((prev) => analyzedToState(result, prev.people));
       const count = result.receipt.lineItems.length;
+      const quotaSuffix =
+        result.quotaRemaining != null ? ` Bugün kalan tarama: ${result.quotaRemaining}.` : "";
       setBanner({
         kind: "ok",
         text: result.cached
-          ? `${count} kalem bulundu (önbellek).`
-          : `${count} kalem okundu. Lütfen kontrol et.`,
+          ? `${count} kalem bulundu (önbellek).${quotaSuffix}`
+          : `${count} kalem okundu. Lütfen kontrol et.${quotaSuffix}`,
       });
       void flushHistory();
     } catch (err) {
@@ -352,29 +399,29 @@ export function App() {
         text: err instanceof Error ? err.message : "Bir şeyler ters gitti.",
       });
     } finally {
-      setScanPhase("idle");
+      beginScanPhase("idle");
     }
   }
 
   async function runScan(picker: () => Promise<PickedUri | null>) {
     setBanner(null);
-    setScanPhase("picking");
+    beginScanPhase("picking");
     prewarmBackend();
     try {
       const picked = await picker();
       if (!picked) {
-        setScanPhase("idle");
+        beginScanPhase("idle");
         return;
       }
       setStep(1);
-      setScanPhase("preparing");
+      beginScanPhase("preparing");
       const image = await optimizePickedImage(picked);
       const imageHash = await hashImageBase64(image.base64);
 
       const store = await getHistoryStore();
       const existing = await store.findByImageHash(imageHash);
       if (existing) {
-        setScanPhase("idle");
+        beginScanPhase("idle");
         Alert.alert(
           "Fiş zaten kayıtlı",
           `"${existing.title}" geçmişte var. Açmak ister misin?`,
@@ -400,7 +447,7 @@ export function App() {
     } catch (err) {
       setBanner({ kind: "error", text: err instanceof Error ? err.message : "Bir şeyler ters gitti." });
     } finally {
-      setScanPhase("idle");
+      beginScanPhase("idle");
     }
   }
 
@@ -408,6 +455,35 @@ export function App() {
     setBanner(null);
     if (state.items.length === 0) addItem();
     setStep(1);
+  }
+
+  /** Rıza kontrol ederek taramayı başlatır — ilk kullanımda onay modalı gösterir. */
+  async function startScanWithConsent(picker: () => Promise<PickedUri | null>) {
+    const consented = await hasPrivacyConsent();
+    if (consented) {
+      void runScan(picker);
+    } else {
+      setPendingPicker(() => picker);
+      setConsentModalVisible(true);
+    }
+  }
+
+  function onConsentAccept() {
+    setConsentModalVisible(false);
+    void acceptPrivacyConsent();
+    if (pendingPicker) {
+      const picker = pendingPicker;
+      setPendingPicker(null);
+      // iOS: modal kapanırken hemen picker açılırsa galeri/kamera sessizce açılmayabilir.
+      InteractionManager.runAfterInteractions(() => {
+        void runScan(picker);
+      });
+    }
+  }
+
+  function onConsentDecline() {
+    setConsentModalVisible(false);
+    setPendingPicker(null);
   }
 
   /** Tarama oturumunu sıfırla; kişiler korunur (yanlış fiş / yeniden tara). */
@@ -429,11 +505,13 @@ export function App() {
     setShareTextSnapshot(undefined);
     setReceiptCreatedAt(undefined);
     resetHistorySnapshot();
+    beginScanPhase("idle");
     setState((prev) => ({
       ...prev,
       items: [],
       assignments: {},
       discountCents: 0,
+      serviceChargeCents: 0,
       tax: { included: true, value: "" },
       tip: { mode: "proportional", isPercent: true, value: "" },
     }));
@@ -477,7 +555,7 @@ export function App() {
       setLlmAppliedItemIds(new Set());
       setHeuristicApplied(false);
       setAssignmentsBeforeSuggest(null);
-      setScanPhase("idle");
+      beginScanPhase("idle");
       setStep(0);
     })();
   }
@@ -487,6 +565,29 @@ export function App() {
       ...prev,
       items: prev.items.map((it) => (it.id === id ? { ...it, ...patch } : it)),
     }));
+  }
+
+  /** Düzenleme bitince tutarı diğer kalemlerle aynı biçime getirir (ör. "46" → "46.00"). */
+  function normalizeItemPrice(id: string) {
+    setState((prev) => ({
+      ...prev,
+      items: prev.items.map((it) => {
+        if (it.id !== id) return it;
+        const trimmed = it.price.trim();
+        if (trimmed === "" || !isValidAmount(trimmed)) return it;
+        return { ...it, price: formatCents(safeToCents(trimmed)) };
+      }),
+    }));
+  }
+
+  /**
+   * Kalem düzenleyicisini açar/kapatır. Kapatırken (ya da başka kaleme geçerken)
+   * o ana dek düzenlenen kalemin tutarını biçimlendirir → onBlur'a bağlı kalmadan
+   * "46" girişi her durumda "46.00" olur.
+   */
+  function toggleItemEditor(id: string) {
+    if (expandedItemId !== null) normalizeItemPrice(expandedItemId);
+    setExpandedItemId(expandedItemId === id ? null : id);
   }
 
   function removeItem(id: string) {
@@ -580,16 +681,14 @@ export function App() {
 
   async function shareSummary() {
     if (!computed) return;
-    const lines = [
-      "Akıllı Hesap Bölüşme",
-      `Toplam: ${state.currency}${formatCents(computed.grandTotalCents)}`,
-      "",
-      ...computed.result.perPerson.map((p) => {
-        const name = peopleById.get(p.personId)?.name ?? "Kişi";
-        return `${name}: ${state.currency}${formatCents(p.totalCents)}`;
-      }),
-    ];
-    const message = lines.join("\n");
+    const message = buildShareText({
+      currency: state.currency,
+      merchant: analysis?.meta.merchant,
+      date: analysis?.meta.date,
+      computed,
+      people: state.people,
+      equalSplit,
+    });
     await Share.share({ message });
     setShareTextSnapshot(message);
     setReceiptStatus("shared");
@@ -616,6 +715,8 @@ export function App() {
       void shareSummary();
       return;
     }
+    // Kalemler adımından çıkarken açık düzenleyicideki tutarı biçimlendir.
+    if (step === 1 && expandedItemId !== null) normalizeItemPrice(expandedItemId);
     if (step === 3 && step3Validation) {
       if (step3Validation.blocked) return;
       if (step3Validation.needsUnassignedConfirm) {
@@ -734,29 +835,25 @@ export function App() {
 
               {backendOk === false && (
                 <View style={[styles.banner, styles.bannerError]}>
-                  <Text style={styles.bannerText}>
-                    Backend’e ulaşılamıyor ({resolveApiBase()}). Sunucuyu başlat: npm run dev -w
-                    @ahb/server
-                  </Text>
+                  <Text style={styles.bannerText}>{backendOfflineMessage()}</Text>
                 </View>
               )}
 
               {scanPhase === "picking" ? (
                 <View style={styles.heroLoading}>
-                  <ActivityIndicator size="large" color={colors.primary} />
-                  <Text style={styles.dim}>{scanMessage}</Text>
+                  <ScanProgressBar colors={colors} phase="picking" />
                 </View>
               ) : (
                 <View style={styles.heroActions}>
                   <Pressable
                     style={[styles.btn, styles.btnPrimary, styles.btnBig]}
-                    onPress={() => runScan(captureFromCamera)}
+                    onPress={() => void startScanWithConsent(captureFromCamera)}
                   >
                     <Text style={styles.btnPrimaryText}>Fişi Tara</Text>
                   </Pressable>
                   <Pressable
                     style={[styles.btn, styles.btnGhost, styles.btnBig]}
-                    onPress={() => runScan(pickFromLibrary)}
+                    onPress={() => void startScanWithConsent(pickFromLibrary)}
                   >
                     <Text style={styles.btnGhostText}>Galeriden Seç</Text>
                   </Pressable>
@@ -797,11 +894,23 @@ export function App() {
                   <Text style={styles.bannerText}>{banner.text}</Text>
                 </View>
               )}
-              {analysis && analysis.needsConfirmation.length > 0 && (
+              {receiptValidation.info.length > 0 && (
+                <View style={[styles.banner, styles.bannerOk]}>
+                  {receiptValidation.info.map((line, i) => (
+                    <Text key={`info-${i}`} style={styles.bannerText}>
+                      {line}
+                    </Text>
+                  ))}
+                </View>
+              )}
+
+              {receiptValidation.warnings.length > 0 && (
                 <View style={[styles.banner, styles.bannerWarn]}>
-                  <Text style={styles.bannerText}>
-                    Kontrol et: {analysis.needsConfirmation.join(", ")}
-                  </Text>
+                  {receiptValidation.warnings.map((line, i) => (
+                    <Text key={`warn-${i}`} style={styles.bannerText}>
+                      {line}
+                    </Text>
+                  ))}
                 </View>
               )}
 
@@ -828,11 +937,13 @@ export function App() {
                 </View>
               )}
 
-              {scanBusy && scanPhase !== "picking" && state.items.length === 0 && (
-                <View style={styles.scanProgress}>
-                  <ActivityIndicator size="small" color={colors.primary} />
-                  <Text style={styles.dim}>{scanMessage}</Text>
-                </View>
+              {scanBusy && (
+                <ScanProgressBar
+                  colors={colors}
+                  phase={scanPhase}
+                  streamItemCount={scanStreamCount}
+                  analyzingStartedAt={analyzingStartedAtRef.current}
+                />
               )}
 
               {scanBusy && state.items.length === 0 ? (
@@ -854,7 +965,7 @@ export function App() {
                     <View key={item.id} style={[styles.itemRow, flagged && styles.itemRowFlagged]}>
                       <Pressable
                         style={styles.itemHead}
-                        onPress={() => setExpandedItemId(open ? null : item.id)}
+                        onPress={() => toggleItemEditor(item.id)}
                       >
                         <View style={styles.rowFlex}>
                           {item.qty > 1 && <Text style={styles.qtyBadge}>{item.qty}×</Text>}
@@ -865,7 +976,7 @@ export function App() {
                         </View>
                         <Text style={styles.itemPrice}>
                           {state.currency}
-                          {item.price.trim() || "0,00"}
+                          {item.price.trim() || "0.00"}
                         </Text>
                       </Pressable>
 
@@ -886,6 +997,7 @@ export function App() {
                               keyboardType="decimal-pad"
                               value={item.price}
                               onChangeText={(t) => updateItem(item.id, { price: t })}
+                              onBlur={() => normalizeItemPrice(item.id)}
                             />
                             <View style={styles.stepper}>
                               <Pressable
@@ -918,6 +1030,85 @@ export function App() {
                     </View>
                   );
                 })}
+
+                {step1Preview && (
+                  <View style={styles.itemsSummaryCard}>
+                    {analysis?.meta.merchant ? (
+                      <Text style={styles.itemsSummaryMerchant} numberOfLines={2}>
+                        {analysis?.meta.merchant}
+                      </Text>
+                    ) : null}
+
+                    <View style={styles.totalRow}>
+                      <Text style={styles.dim}>Kalemler</Text>
+                      <Text style={styles.dim}>
+                        {state.currency}
+                        {formatCents(step1Preview.subtotalCents)}
+                      </Text>
+                    </View>
+
+                    {step1Preview.serviceChargeCents > 0 && (
+                      <View style={styles.totalRow}>
+                        <Text style={styles.dim}>Servis</Text>
+                        <Text style={styles.dim}>
+                          {state.currency}
+                          {formatCents(step1Preview.serviceChargeCents)}
+                        </Text>
+                      </View>
+                    )}
+
+                    {step1Preview.discountCents > 0 && (
+                      <View style={styles.totalRow}>
+                        <Text style={styles.dim}>İndirim</Text>
+                        <Text style={styles.dim}>
+                          −{state.currency}
+                          {formatCents(step1Preview.discountCents)}
+                        </Text>
+                      </View>
+                    )}
+
+                    {!state.tax.included && step1Preview.taxCents > 0 && (
+                      <View style={styles.totalRow}>
+                        <Text style={styles.dim}>KDV</Text>
+                        <Text style={styles.dim}>
+                          {state.currency}
+                          {formatCents(step1Preview.taxCents)}
+                        </Text>
+                      </View>
+                    )}
+
+                    {step1Preview.tipCents > 0 && (
+                      <View style={styles.totalRow}>
+                        <Text style={styles.dim}>Bahşiş</Text>
+                        <Text style={styles.dim}>
+                          {state.currency}
+                          {formatCents(step1Preview.tipCents)}
+                        </Text>
+                      </View>
+                    )}
+
+                    <View style={styles.totalRow}>
+                      <Text style={styles.totalLabel}>Toplam</Text>
+                      <Text style={styles.totalAmount}>
+                        {state.currency}
+                        {formatCents(step1Preview.grandTotalCents)}
+                      </Text>
+                    </View>
+
+                    {analysis && analysis.arithmetic.declaredTotalCents > 0 && (
+                      <Text
+                        style={[
+                          styles.itemsSummaryDeclared,
+                          !itemsAlignWithReceiptTotal(analysis, currentItemsSumCents) &&
+                            styles.itemsSummaryDeclaredWarn,
+                        ]}
+                      >
+                        Fişte yazan: {state.currency}
+                        {formatCents(analysis.arithmetic.declaredTotalCents)}
+                      </Text>
+                    )}
+                  </View>
+                )}
 
                 <Pressable style={styles.addRow} onPress={addItem}>
                   <Text style={styles.link}>+ Kalem ekle</Text>
@@ -1047,7 +1238,7 @@ export function App() {
                         </View>
                         <Text style={styles.itemPrice}>
                           {state.currency}
-                          {item.price.trim() || "0,00"}
+                          {item.price.trim() || "0.00"}
                         </Text>
                       </View>
 
@@ -1234,6 +1425,16 @@ export function App() {
                     })}
                   </View>
 
+                  {computed.serviceChargeCents > 0 && (
+                    <View style={styles.totalRow}>
+                      <Text style={styles.dim}>Servis bedeli (oransal)</Text>
+                      <Text style={styles.dim}>
+                        {state.currency}
+                        {formatCents(computed.serviceChargeCents)}
+                      </Text>
+                    </View>
+                  )}
+
                   {computed.discountCents > 0 && (
                     <View style={styles.totalRow}>
                       <Text style={styles.dim}>İndirim (oransal)</Text>
@@ -1285,6 +1486,24 @@ export function App() {
                       }
                     />
                   )}
+
+                  <TextInput
+                    style={styles.input}
+                    placeholder="Servis bedeli (kuver)"
+                    placeholderTextColor={colors.textDim}
+                    keyboardType="decimal-pad"
+                    value={
+                      state.serviceChargeCents > 0
+                        ? formatCents(state.serviceChargeCents)
+                        : ""
+                    }
+                    onChangeText={(t) =>
+                      setState((prev) => ({
+                        ...prev,
+                        serviceChargeCents: safeToCents(t),
+                      }))
+                    }
+                  />
 
                   <View style={styles.switchRow}>
                     <Text style={styles.label}>Bahşiş yüzde olarak</Text>
@@ -1402,6 +1621,45 @@ export function App() {
           resetAll();
         }}
       />
+
+      {/* Gizlilik Rızası Modalı — ilk taramada bir kez gösterilir */}
+      <Modal
+        visible={consentModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={onConsentDecline}
+      >
+        <View style={styles.consentOverlay}>
+          <View style={styles.consentCard}>
+            <Text style={styles.consentTitle}>Gizlilik Bilgisi</Text>
+            <Text style={styles.consentBody}>
+              Taradığın fiş görseli, AI ile metin çıkarmak için sunucumuza gönderilir. Görsel
+              kalıcı olarak saklanmaz; yalnızca anlık işlem için kullanılır.{"\n\n"}
+              Cihaz kimliğin günlük kota takibi amacıyla sunucuda tutulur. Kişisel ödeme bilgisi
+              toplanmaz.
+            </Text>
+            <Pressable
+              style={styles.consentPrivacyLink}
+              onPress={() =>
+                void Linking.openURL(`${resolveApiBase()}/privacy`)
+              }
+            >
+              <Text style={styles.link}>Gizlilik Politikasını Oku →</Text>
+            </Pressable>
+            <View style={styles.consentActions}>
+              <Pressable style={[styles.btn, styles.btnGhost]} onPress={onConsentDecline}>
+                <Text style={styles.btnGhostText}>İptal</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.btn, styles.btnPrimary, styles.consentAcceptBtn]}
+                onPress={onConsentAccept}
+              >
+                <Text style={styles.btnPrimaryText}>Anladım, Devam Et</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1512,6 +1770,29 @@ function makeStyles(c: Palette) {
     rescanBtnText: { color: c.primary, fontWeight: "700", fontSize: 13 },
     rescanLinkWrap: { alignItems: "center", paddingVertical: 8 },
     rescanLinkText: { color: c.textDim, fontSize: 14, fontWeight: "600" },
+
+    itemsSummaryCard: {
+      marginTop: 12,
+      padding: 14,
+      borderRadius: radius.md,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      gap: 4,
+    },
+    itemsSummaryMerchant: {
+      color: c.text,
+      fontSize: 15,
+      fontWeight: "700",
+      marginBottom: 6,
+    },
+    itemsSummaryDeclared: {
+      marginTop: 8,
+      color: c.textDim,
+      fontSize: 13,
+      fontWeight: "600",
+    },
+    itemsSummaryDeclaredWarn: { color: c.warn },
 
     input: {
       backgroundColor: c.surfaceAlt,
@@ -1772,5 +2053,27 @@ function makeStyles(c: Palette) {
     miniAmount: { color: c.text, fontSize: 13, fontWeight: "800" },
     footerHint: { color: c.textDim, fontSize: 13, textAlign: "center", lineHeight: 18 },
     footerHintWarn: { color: c.warn, fontWeight: "600" },
+
+    // Gizlilik rızası modalı
+    consentOverlay: {
+      flex: 1,
+      backgroundColor: "rgba(0,0,0,0.65)",
+      justifyContent: "center",
+      alignItems: "center",
+      padding: 24,
+    },
+    consentCard: {
+      backgroundColor: c.surface,
+      borderRadius: radius.lg,
+      padding: 24,
+      gap: 14,
+      width: "100%",
+      maxWidth: 420,
+    },
+    consentTitle: { color: c.text, fontSize: 20, fontWeight: "800" },
+    consentBody: { color: c.textDim, fontSize: 15, lineHeight: 22 },
+    consentPrivacyLink: { alignSelf: "flex-start" },
+    consentActions: { flexDirection: "row", gap: 10, marginTop: 4 },
+    consentAcceptBtn: { flex: 1 },
   });
 }

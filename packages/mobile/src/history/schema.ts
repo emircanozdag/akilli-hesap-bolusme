@@ -34,6 +34,7 @@ export const splitStateSchema = z.object({
   tax: taxStateSchema,
   tip: tipStateSchema,
   discountCents: z.number().int(),
+  serviceChargeCents: z.number().int().default(0),
 });
 
 export const receiptStatusSchema = z.enum(["draft", "confirmed", "shared"]);

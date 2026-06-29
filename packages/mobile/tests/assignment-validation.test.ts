@@ -15,6 +15,7 @@ function baseState(overrides: Partial<SplitState> = {}): SplitState {
     ],
     assignments: {},
     discountCents: 0,
+    serviceChargeCents: 0,
     tax: { included: true, value: "" },
     tip: { mode: "proportional", isPercent: true, value: "" },
     ...overrides,

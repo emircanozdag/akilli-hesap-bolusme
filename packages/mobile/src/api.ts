@@ -6,8 +6,14 @@ import type { AnalyzedReceipt } from "@ahb/ai-orchestrator";
 import { prepareImageForUpload } from "./image-optimize";
 import { fetchWithTimeout } from "./fetch-timeout";
 import { deviceId, resolveApiBase } from "./api-base";
+import {
+  formatHttpError,
+  formatNetworkError,
+  type ApiErrorBody,
+} from "./api-errors";
 
-export { resolveApiBase } from "./api-base";
+export { resolveApiBase, apiBaseSource, isConfiguredProductionApi } from "./api-base";
+export { backendOfflineMessage } from "./api-errors";
 
 const ANALYZE_TIMEOUT_MS = 90_000;
 
@@ -20,8 +26,13 @@ export interface PickedImage {
 
 export type ScanPhase = "idle" | "picking" | "preparing" | "uploading" | "analyzing";
 
+/** Sunucudan dönen genişletilmiş tarama sonucu (kota bilgisi dahil). */
+export interface ScanResult extends AnalyzedReceipt {
+  quotaRemaining?: number;
+}
+
 export const SCAN_PHASE_MESSAGES: Record<Exclude<ScanPhase, "idle">, string> = {
-  picking: "Kamera açılıyor…",
+  picking: "Galeri veya kamera açılıyor…",
   preparing: "Fotoğraf hazırlanıyor…",
   uploading: "Fiş okunuyor…",
   analyzing: "Kalemler okunuyor… (30–60 sn sürebilir)",
@@ -46,6 +57,10 @@ export async function captureFromCamera(): Promise<PickedUri | null> {
 }
 
 export async function pickFromLibrary(): Promise<PickedUri | null> {
+  const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+  if (!perm.granted) {
+    throw new Error("Galeri izni verilmedi. Ayarlardan fotoğraflara erişime izin ver.");
+  }
   const result = await ImagePicker.launchImageLibraryAsync({
     base64: false,
     mediaTypes: ["images"],
@@ -100,7 +115,7 @@ async function buildAnalyzeRequest(image: PickedImage, locale: string): Promise<
 export async function analyzeViaServer(
   image: PickedImage,
   locale: string,
-): Promise<AnalyzedReceipt> {
+): Promise<ScanResult> {
   const url = `${resolveApiBase()}/analyze`;
   if (typeof __DEV__ !== "undefined" && __DEV__) {
     console.log(`[ahb] analyze → ${url}`);
@@ -112,22 +127,17 @@ export async function analyzeViaServer(
   try {
     res = await fetchWithTimeout(url, init, ANALYZE_TIMEOUT_MS);
   } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new Error("Fiş okuma zaman aşımına uğradı. Tekrar dener misin?");
-    }
     if (typeof __DEV__ !== "undefined" && __DEV__) {
       console.warn("[ahb] analyze fetch failed", url, err);
     }
-    throw new Error(
-      `Sunucuya ulaşılamadı (${url.replace("/analyze", "")}). Aynı Wi‑Fi’da olduğundan ve backend’in çalıştığından emin ol.`,
-    );
+    throw new Error(formatNetworkError(err, "analyze"));
   }
 
   if (!res.ok) {
-    const detail = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(detail.error ?? `Sunucu hatası (${res.status})`);
+    const detail = (await res.json().catch(() => ({}))) as ApiErrorBody;
+    throw new Error(formatHttpError(res.status, detail, "analyze"));
   }
-  return (await res.json()) as AnalyzedReceipt;
+  return (await res.json()) as ScanResult;
 }
 
 /**
@@ -164,11 +174,11 @@ export function analyzeViaServerStream(
   image: PickedImage,
   locale: string,
   onItem: (item: StreamItem) => void,
-): Promise<AnalyzedReceipt> {
+): Promise<ScanResult> {
   const url = `${resolveApiBase()}/analyze/stream`;
   return buildAnalyzeRequest(image, locale).then(
     (init) =>
-      new Promise<AnalyzedReceipt>((resolve, reject) => {
+      new Promise<ScanResult>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("POST", url);
         const headers = init.headers as Record<string, string> | undefined;
@@ -180,7 +190,7 @@ export function analyzeViaServerStream(
         xhr.timeout = ANALYZE_TIMEOUT_MS;
 
         let cursor = 0;
-        let finalResult: AnalyzedReceipt | null = null;
+        let finalResult: ScanResult | null = null;
         let streamError: string | null = null;
 
         const handleEvent = (event: string, data: string) => {
@@ -193,13 +203,14 @@ export function analyzeViaServerStream(
             }
           } else if (event === "result") {
             try {
-              finalResult = JSON.parse(data) as AnalyzedReceipt;
+              finalResult = JSON.parse(data) as ScanResult;
             } catch {
               streamError = "Sonuç çözümlenemedi";
             }
           } else if (event === "error") {
             try {
-              streamError = (JSON.parse(data) as { error?: string }).error ?? "AI hatası";
+              const parsed = JSON.parse(data) as ApiErrorBody;
+              streamError = parsed.error ?? "AI hatası";
             } catch {
               streamError = "AI hatası";
             }
@@ -227,11 +238,24 @@ export function analyzeViaServerStream(
         xhr.onload = () => {
           drain();
           if (finalResult) resolve(finalResult);
-          else reject(new Error(streamError ?? `Sunucu hatası (${xhr.status})`));
+          else if (xhr.status >= 400) {
+            let body: ApiErrorBody = {};
+            try {
+              body = JSON.parse(xhr.responseText) as ApiErrorBody;
+            } catch {
+              /* SSE gövdesi JSON olmayabilir */
+            }
+            reject(new Error(formatHttpError(xhr.status, body, "analyze")));
+          } else {
+            reject(new Error(streamError ?? formatNetworkError(new Error("Sunucuya ulaşılamadı"), "analyze")));
+          }
         };
-        xhr.onerror = () => reject(new Error("Sunucuya ulaşılamadı (akış)."));
-        xhr.ontimeout = () =>
-          reject(new Error("Fiş okuma zaman aşımına uğradı. Tekrar dener misin?"));
+        xhr.onerror = () => reject(new Error(formatNetworkError(new Error("Network request failed"), "analyze")));
+        xhr.ontimeout = () => {
+          const err = new Error("timeout");
+          err.name = "AbortError";
+          reject(new Error(formatNetworkError(err, "analyze")));
+        };
 
         xhr.send(init.body as Blob | string | null);
       }),

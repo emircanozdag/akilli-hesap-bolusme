@@ -8,7 +8,9 @@
     "dev": "node --import tsx --watch src/index.node.ts",
     "start": "node --import tsx src/index.node.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "deploy": "wrangler deploy",
+    "deploy:dry": "wrangler deploy --dry-run"
   },
   "dependencies": {
     "@ahb/ai-orchestrator": "*",

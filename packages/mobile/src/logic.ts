@@ -54,6 +54,8 @@ export interface SplitState {
   tip: TipState;
   /** Fişten yakalanan toplam indirim (kuruş, pozitif). Kalem tabanına oransal düşülür. */
   discountCents: Cents;
+  /** Servis/kuver bedeli (kuruş, pozitif). Bahşiş gibi oransal dağıtılır. */
+  serviceChargeCents: Cents;
 }
 
 export interface ComputedSplit {
@@ -62,6 +64,7 @@ export interface ComputedSplit {
   taxCents: Cents;
   tipCents: Cents;
   discountCents: Cents;
+  serviceChargeCents: Cents;
   grandTotalCents: Cents;
 }
 
@@ -102,6 +105,7 @@ export function computeFromState(state: SplitState): ComputedSplit | null {
   const taxCents = state.tax.included ? 0 : safeToCents(state.tax.value);
   // İndirim ara toplamı aşamaz (negatif fiş engellenir).
   const discountCents = Math.min(Math.max(0, state.discountCents), subtotalCents);
+  const serviceChargeCents = Math.max(0, state.serviceChargeCents);
 
   const tipCents = state.tip.isPercent
     ? percentOf(subtotalCents, state.tip.value)
@@ -118,10 +122,10 @@ export function computeFromState(state: SplitState): ComputedSplit | null {
       charges: {
         subtotalCents,
         taxCents,
-        serviceChargeCents: 0,
+        serviceChargeCents,
         discountCents,
         tipCents,
-        totalCents: subtotalCents - discountCents + taxCents + tipCents,
+        totalCents: subtotalCents - discountCents + taxCents + tipCents + serviceChargeCents,
         taxIncludedInItems: state.tax.included,
       },
     },
@@ -142,6 +146,7 @@ export function computeFromState(state: SplitState): ComputedSplit | null {
     taxCents,
     tipCents,
     discountCents,
+    serviceChargeCents,
     grandTotalCents: result.totalCents,
   };
 }
@@ -176,6 +181,7 @@ export function analyzedToState(analyzed: AnalyzedReceipt, prevPeople: PersonRow
     })),
     assignments: {},
     discountCents: receipt.charges.discountCents,
+    serviceChargeCents: receipt.charges.serviceChargeCents,
     tax: {
       included: receipt.charges.taxIncludedInItems,
       value: receipt.charges.taxIncludedInItems ? "" : formatCents(receipt.charges.taxCents),
