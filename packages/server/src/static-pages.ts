@@ -69,11 +69,16 @@ function htmlPage(title: string, body: string): string {
 
 export function homePageHtml(): string {
   return htmlPage(
-    BRAND,
-    `<main style="max-width:520px;text-align:center;min-height:100vh;display:flex;flex-direction:column;justify-content:center;margin:0 auto;padding:2rem 1.25rem;">
+    `${BRAND} — Fişi tara, hesabı adil böl`,
+    `<main style="max-width:560px;text-align:center;min-height:100vh;display:flex;flex-direction:column;justify-content:center;margin:0 auto;padding:2rem 1.25rem;">
       <h1>${BRAND}</h1>
-      <p style="color:var(--muted)">Scan the receipt. Split the tab fairly.</p>
-      <p><a href="/privacy">Privacy Policy</a> · <a href="mailto:${SUPPORT_EMAIL}">Support</a></p>
+      <p style="color:var(--muted);font-size:1.05rem;line-height:1.55;">
+        Restoran fişini tara, kalemleri kişilere ata, kişi başı tutarı paylaş.
+        <strong style="color:var(--text);display:block;margin-top:0.75rem;">Yalnızca iOS uygulaması — web sürümü yok.</strong>
+      </p>
+      <p style="margin-top:1.5rem;">
+        <a href="/privacy">Gizlilik Politikası</a> · <a href="mailto:${SUPPORT_EMAIL}">Destek</a>
+      </p>
     </main>`,
   );
 }

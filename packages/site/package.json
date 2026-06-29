@@ -2,8 +2,9 @@
   "name": "@ahb/site",
   "version": "0.1.0",
   "private": true,
-  "description": "Statik site — gizlilik politikası ve destek (Cloudflare Pages)",
+  "description": "SplitTab tanıtım sitesi — mobil uygulama landing + gizlilik (Cloudflare Pages)",
   "scripts": {
+    "preview": "python3 -m http.server 4173",
     "deploy": "wrangler pages deploy . --project-name=akilli-hesap-bolusme"
   }
 }

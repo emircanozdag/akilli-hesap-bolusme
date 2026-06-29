@@ -1,51 +1,306 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="tr">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>SplitTab</title>
-    <meta name="description" content="Scan the receipt. Split the tab fairly." />
+    <title>SplitTab — Fişi tara, hesabı adil böl</title>
+    <meta
+      name="description"
+      content="SplitTab ile restoran fişini fotoğrafla, kalemleri kişilere ata ve kişi başı tutarı saniyeler içinde paylaş."
+    />
+    <meta name="theme-color" content="#0b0e1a" />
+    <link rel="icon" href="/assets/app-icon.png" type="image/png" />
     <style>
       :root {
         color-scheme: light dark;
         --bg: #0b0e1a;
-        --text: #e8ecf4;
-        --muted: #9aa3b8;
-        --accent: #6ea8ff;
-        --border: #243049;
-        --card: #141a2e;
+        --surface: #161a2b;
+        --surface-alt: #1f2438;
+        --border: #2a3050;
+        --text: #f3f5ff;
+        --muted: #9aa3c7;
+        --primary: #6c8bff;
+        --success: #3ecf8e;
+        --shadow: rgba(0, 0, 0, 0.35);
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #f4f6fb;
+          --surface: #ffffff;
+          --surface-alt: #eef1f9;
+          --border: #dde2f0;
+          --text: #171c2e;
+          --muted: #6b7494;
+          --primary: #4f6ef7;
+          --success: #13a06b;
+          --shadow: rgba(23, 28, 46, 0.08);
+        }
+      }
+      * {
+        box-sizing: border-box;
       }
       body {
         margin: 0;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+          sans-serif;
         background: var(--bg);
         color: var(--text);
-        min-height: 100vh;
+        line-height: 1.55;
+      }
+      a {
+        color: var(--primary);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      .wrap {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 0 1.25rem;
+      }
+      header {
+        padding: 2.5rem 0 1rem;
+        text-align: center;
+      }
+      .logo {
+        width: 88px;
+        height: 88px;
+        border-radius: 22px;
+        box-shadow: 0 12px 40px var(--shadow);
+        margin-bottom: 1.25rem;
+      }
+      h1 {
+        font-size: clamp(2rem, 5vw, 2.75rem);
+        letter-spacing: -0.03em;
+        margin: 0 0 0.5rem;
+      }
+      .tagline {
+        color: var(--muted);
+        font-size: 1.125rem;
+        max-width: 34rem;
+        margin: 0 auto 1.75rem;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.55rem 1rem;
+        border-radius: 999px;
+        background: var(--surface-alt);
+        border: 1px solid var(--border);
+        color: var(--muted);
+        font-size: 0.9rem;
+        margin-bottom: 2rem;
+      }
+      .badge-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--success);
+      }
+      .cta-row {
         display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        justify-content: center;
+        margin-bottom: 3rem;
+      }
+      .btn {
+        display: inline-flex;
         align-items: center;
         justify-content: center;
-      }
-      main { text-align: center; padding: 2rem; }
-      a {
-        color: var(--accent);
+        min-height: 48px;
+        padding: 0.75rem 1.35rem;
+        border-radius: 12px;
+        font-weight: 600;
+        font-size: 0.95rem;
+        border: 1px solid transparent;
         text-decoration: none;
-        display: inline-block;
-        margin: 0.4rem;
-        padding: 0.75rem 1.25rem;
+      }
+      .btn-primary {
+        background: var(--primary);
+        color: #fff;
+      }
+      .btn-primary:hover {
+        filter: brightness(1.05);
+        text-decoration: none;
+      }
+      .btn-secondary {
+        background: var(--surface);
+        border-color: var(--border);
+        color: var(--text);
+      }
+      .btn-secondary:hover {
+        background: var(--surface-alt);
+        text-decoration: none;
+      }
+      .btn-disabled {
+        opacity: 0.72;
+        cursor: default;
+        pointer-events: none;
+      }
+      section {
+        margin-bottom: 3.5rem;
+      }
+      h2 {
+        text-align: center;
+        font-size: 1.35rem;
+        margin: 0 0 1.25rem;
+      }
+      .grid {
+        display: grid;
+        gap: 1rem;
+      }
+      @media (min-width: 640px) {
+        .grid-3 {
+          grid-template-columns: repeat(3, 1fr);
+        }
+        .grid-4 {
+          grid-template-columns: repeat(4, 1fr);
+        }
+      }
+      .card {
+        background: var(--surface);
         border: 1px solid var(--border);
-        border-radius: 10px;
-        background: var(--card);
+        border-radius: 16px;
+        padding: 1.25rem 1.35rem;
+        box-shadow: 0 8px 24px var(--shadow);
+      }
+      .card-icon {
+        font-size: 1.6rem;
+        margin-bottom: 0.65rem;
+      }
+      .card h3 {
+        margin: 0 0 0.45rem;
+        font-size: 1.05rem;
+      }
+      .card p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+      .step-num {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 2rem;
+        height: 2rem;
+        border-radius: 999px;
+        background: var(--surface-alt);
+        color: var(--primary);
+        font-weight: 700;
+        font-size: 0.9rem;
+        margin-bottom: 0.75rem;
+      }
+      .highlight {
+        background: linear-gradient(135deg, var(--surface) 0%, var(--surface-alt) 100%);
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        padding: 1.75rem 1.5rem;
+        text-align: center;
+      }
+      .highlight p {
+        margin: 0;
+        color: var(--muted);
+        max-width: 36rem;
+        margin-inline: auto;
+      }
+      footer {
+        border-top: 1px solid var(--border);
+        padding: 2rem 0 2.5rem;
+        text-align: center;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+      footer p {
+        margin: 0.35rem 0;
       }
     </style>
   </head>
   <body>
-    <main>
-      <h1>SplitTab</h1>
-      <p style="color: var(--muted)">Scan the receipt. Split the tab fairly.</p>
-      <p>
-        <a href="/privacy/">Privacy Policy</a>
-        <a href="mailto:emircanozdag@gmail.com">Support</a>
-      </p>
-    </main>
+    <div class="wrap">
+      <header>
+        <img class="logo" src="/assets/app-icon.png" width="88" height="88" alt="SplitTab uygulama ikonu" />
+        <h1>SplitTab</h1>
+        <p class="tagline">
+          Restoran fişini tara, kalemleri kişilere ata, kişi başı tutarı adil ve şeffaf şekilde paylaş.
+        </p>
+        <div class="badge" aria-label="Yalnızca mobil uygulama">
+          <span class="badge-dot" aria-hidden="true"></span>
+          iOS uygulaması — web sürümü yok
+        </div>
+        <div class="cta-row">
+          <span class="btn btn-primary btn-disabled" aria-disabled="true">App Store'da yakında</span>
+          <a class="btn btn-secondary" href="mailto:emircanozdag@gmail.com">Destek</a>
+        </div>
+      </header>
+
+      <section aria-labelledby="features-heading">
+        <h2 id="features-heading">Neden SplitTab?</h2>
+        <div class="grid grid-3">
+          <article class="card">
+            <div class="card-icon" aria-hidden="true">📸</div>
+            <h3>Fişi saniyeler içinde oku</h3>
+            <p>Kameradan veya galeriden fiş fotoğrafı seç; kalemler ve tutarlar otomatik çıkarılsın.</p>
+          </article>
+          <article class="card">
+            <div class="card-icon" aria-hidden="true">👥</div>
+            <h3>Kim ne yedi?</h3>
+            <p>Her kalemi kişilere ata; vergi ve bahşişi adil dağıt, indirimleri doğru yansıt.</p>
+          </article>
+          <article class="card">
+            <div class="card-icon" aria-hidden="true">💬</div>
+            <h3>Özeti paylaş</h3>
+            <p>Kişi başı net tutarı WhatsApp veya mesajla tek dokunuşla gönder.</p>
+          </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="how-heading">
+        <h2 id="how-heading">Nasıl çalışır?</h2>
+        <div class="grid grid-4">
+          <article class="card">
+            <div class="step-num">1</div>
+            <h3>Tara</h3>
+            <p>Fiş fotoğrafını çek veya seç.</p>
+          </article>
+          <article class="card">
+            <div class="step-num">2</div>
+            <h3>Onayla</h3>
+            <p>Kalemleri kontrol et, gerekirse düzelt.</p>
+          </article>
+          <article class="card">
+            <div class="step-num">3</div>
+            <h3>Ata</h3>
+            <p>Kişileri ekle, her kalemi paylaştır.</p>
+          </article>
+          <article class="card">
+            <div class="step-num">4</div>
+            <h3>Paylaş</h3>
+            <p>Kişi başı özeti gruba gönder.</p>
+          </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="privacy-heading">
+        <div class="highlight">
+          <h2 id="privacy-heading" style="margin-top: 0">Gizliliğinize saygı</h2>
+          <p>
+            Hesap oluşturmanız gerekmez. Fiş geçmişi cihazınızda kalır; görüntüler yalnızca okuma için
+            işlenir ve kalıcı olarak saklanmaz.
+          </p>
+        </div>
+      </section>
+
+      <footer>
+        <p>
+          <a href="/privacy/">Gizlilik Politikası</a>
+          ·
+          <a href="mailto:emircanozdag@gmail.com">emircanozdag@gmail.com</a>
+        </p>
+        <p>© 2026 SplitTab</p>
+      </footer>
+    </div>
   </body>
 </html>

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Akıllı Hesap Bölüşme — web (manuel giriş → atama → özet → paylaşım, çevrimdışı çalışır).",
+  "description": "[Arşiv] Eski web prototipi — aktif ürün yalnızca packages/mobile.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
